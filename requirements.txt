@@ -1,0 +1,3 @@
+rossum-api>=3.12.0
+pyyaml>=6.0
+requests>=2.32.0

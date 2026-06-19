@@ -1,0 +1,725 @@
+deployed_org_id: null
+hooks:
+- id: 339158
+  name: Coupa Webhook Import - Suppliers (CIB)
+  targets:
+  - id: null
+- id: 339902
+  name: Coupa Webhook Import - Account Types (CIB)
+  targets:
+  - id: null
+- id: 339970
+  name: Coupa Webhook Import - Purchase Orders (CIB)
+  targets:
+  - id: null
+- id: 340003
+  name: Coupa Webhook Import - Tax Codes (CIB)
+  targets:
+  - id: null
+- id: 342923
+  name: Coupa Webhook Import - Lookup values (CIB)
+  targets:
+  - id: null
+- id: 342955
+  name: Coupa Webhook Import - Units of Measure (CIB)
+  targets:
+  - id: null
+- id: 343051
+  name: MDH - Main (CIB)
+  targets:
+  - id: null
+- id: 418429
+  name: Export Mapping - LIne Level Taxation (CIB)
+  targets:
+  - id: null
+- id: 418430
+  name: Create Draft (CIB)
+  targets:
+  - id: null
+- id: 418431
+  name: Create Draft - parse response (CIB)
+  targets:
+  - id: null
+- id: 418432
+  name: Attach Image Scan (CIB)
+  targets:
+  - id: null
+- id: 418433
+  name: Attach Image Scan - parse response (CIB)
+  targets:
+  - id: null
+- id: 418434
+  name: Attach Rossum URL (CIB)
+  targets:
+  - id: null
+- id: 418435
+  name: Attach Rossum URL - parse response (CIB)
+  targets:
+  - id: null
+- id: 418436
+  name: Submit document (CIB)
+  targets:
+  - id: null
+- id: 418437
+  name: Submit Document - parse response (CIB)
+  targets:
+  - id: null
+- id: 418438
+  name: Handle Coupa Responses (CIB)
+  targets:
+  - id: null
+- id: 735954
+  name: Metadata Propagator (CIB)
+  targets:
+  - id: null
+- id: 419136
+  name: Export Mapping - Header Level Taxation (CIB)
+  targets:
+  - id: null
+- id: 421929
+  name: Coupa Webhook Import - Tax Registrations (CIB)
+  targets:
+  - id: null
+- id: 421930
+  name: Coupa Webhook Import - Addresses (CIB)
+  targets:
+  - id: null
+- id: 421931
+  name: Coupa Webhook Import - Purchase Order Lines (CIB)
+  targets:
+  - id: null
+- id: 422850
+  name: Coupa Webhook Import - Payment Terms (CIB)
+  targets:
+  - id: null
+- id: 444021
+  name: Duplicate Handling (CIB)
+  targets:
+  - id: null
+- id: 453520
+  name: MDH - Payment Terms (CIB)
+  targets:
+  - id: null
+- id: 540278
+  name: MDH - Tax Codes (CIB)
+  targets:
+  - id: null
+- id: 735955
+  name: MDH - Coupa Invoice Check (CIB)
+  targets:
+  - id: null
+- id: 693315
+  name: Supplier memorization (CIB)
+  targets:
+  - id: null
+- id: 693316
+  name: Customer memorization (CIB)
+  targets:
+  - id: null
+- id: 694975
+  name: Coupa Webhook Import - Remit To Addresses (CIB)
+  targets:
+  - id: null
+- id: 747526
+  name: Tax Coding Memorization (CIB)
+  targets:
+  - id: null
+- id: 784911
+  name: Coupa Webhook Import - Contracts (CIB)
+  targets:
+  - id: null
+patch_target_org: false
+queues:
+- base_path: cib/cib/workspaces/Coupa Integration Baseline_[522159]
+  id: 1260377
+  ignore_deploy_warnings: true
+  inbox:
+    id: 566674
+    targets:
+    - id: null
+  name: AP Documents - line level taxation
+  schema:
+    id: 1301955
+    targets:
+    - attribute_override:
+        content[].children[?id=='coupa_api_base_url'].default_value: https://rossum-czech-coupalink.coupacloud.com/
+        content[].children[?id=='coupa_api_base_url'].formula: '''https://rossum-czech-coupalink.coupacloud.com/'''
+        content[].children[?id=='oauth_client_id'].default_value: 4a2e81073faff8e68d28a0dafedb259d
+        content[].children[?id=='oauth_client_id'].formula: '''4a2e81073faff8e68d28a0dafedb259d'''
+      id: null
+  targets:
+  - id: null
+- base_path: cib/cib/workspaces/Coupa Integration Baseline_[522159]
+  id: 1260388
+  ignore_deploy_warnings: true
+  inbox:
+    id: 708171
+    targets:
+    - id: null
+  name: AP Documents - header level taxation
+  schema:
+    id: 1301966
+    targets:
+    - attribute_override:
+        content[].children[?id=='coupa_api_base_url'].default_value: https://rossum-czech-coupalink.coupacloud.com/
+        content[].children[?id=='coupa_api_base_url'].formula: '''https://rossum-czech-coupalink.coupacloud.com/'''
+        content[].children[?id=='oauth_client_id'].default_value: 4a2e81073faff8e68d28a0dafedb259d
+        content[].children[?id=='oauth_client_id'].formula: '''4a2e81073faff8e68d28a0dafedb259d'''
+      id: null
+  targets:
+  - id: null
+deploy_state_file: deploy_states/cib_target.json
+secrets_file: deploy_secrets/cib_target_secrets.json
+source_dir: cib/cib
+source_url: https://cib.rossum.app/api/v1
+target_dir: target/target
+target_url: https://elis.rossum.ai/api/v1
+token_owner_id: 111254
+unselected_hooks: []
+rules:
+- id: 6765
+  name: TEST - Required - Recipient Match (CIB)
+  targets:
+  - id: null
+- id: 6766
+  name: TEST - Customer Mismatch Warning (CIB)
+  targets:
+  - id: null
+- id: 6767
+  name: TEST - Payment Terms Mismatch (CIB)
+  targets:
+  - id: null
+- id: 6768
+  name: TEST - Supplier Mismatch Warning (CIB)
+  targets:
+  - id: null
+- id: 6769
+  name: TEST - Negative Amount - Not Credit Note (CIB)
+  targets:
+  - id: null
+- id: 6770
+  name: TEST - PO Line Match Required (Line Items) (CIB)
+  targets:
+  - id: null
+- id: 6771
+  name: TEST - PO Line Match Required (No Line Items) (CIB)
+  targets:
+  - id: null
+- id: 6772
+  name: TEST - Required - Line Total or Unit Price (CIB)
+  targets:
+  - id: null
+- id: 6773
+  name: TEST - Line Total Not Equal to Quantity x Unit Price (CIB)
+  targets:
+  - id: null
+- id: 6774
+  name: TEST - Coupa Total Mismatch (CIB)
+  targets:
+  - id: null
+- id: 6775
+  name: TEST - Duplicate Detected (CIB)
+  targets:
+  - id: null
+- id: 6776
+  name: TEST - Invoice Date Out of Range (CIB)
+  targets:
+  - id: null
+- id: 6777
+  name: TEST - Invoice Number Missing (CIB)
+  targets:
+  - id: null
+- id: 6778
+  name: TEST - Invoice Number Manual Too Long (CIB)
+  targets:
+  - id: null
+- id: 6779
+  name: TEST - Invoice Number Too Long (CIB)
+  targets:
+  - id: null
+- id: 6780
+  name: TEST - Required - Description (No Line Items) (CIB)
+  targets:
+  - id: null
+- id: 6781
+  name: TEST - Currency Mismatch (No Line Items) (CIB)
+  targets:
+  - id: null
+- id: 6782
+  name: TEST - Currency Mismatch (With Line Items) (CIB)
+  targets:
+  - id: null
+- id: 6783
+  name: TEST - Coupa Duplicate Found (CIB)
+  targets:
+  - id: null
+- id: 6784
+  name: TEST - PO is Closed (CIB)
+  targets:
+  - id: null
+- id: 6785
+  name: TEST - PO is Closed (Line Items) (CIB)
+  targets:
+  - id: null
+- id: 6786
+  name: TEST - PO Line is Closed (Line Items) (CIB)
+  targets:
+  - id: null
+- id: 6787
+  name: TEST - PO Line is Closed (CIB)
+  targets:
+  - id: null
+- id: 6788
+  name: TEST - PO Not Found in Coupa (CIB)
+  targets:
+  - id: null
+- id: 6789
+  name: TEST - PO Not Found in Coupa (Line Items) (CIB)
+  targets:
+  - id: null
+- id: 6790
+  name: TEST - Service Period Start Before PO Start (CIB)
+  targets:
+  - id: null
+- id: 6791
+  name: TEST - Service Period Start Before PO Start (Line Items) (CIB)
+  targets:
+  - id: null
+- id: 6792
+  name: TEST - Service Period End After PO End (CIB)
+  targets:
+  - id: null
+- id: 6793
+  name: TEST - Service Period End After PO End (Line Items) (CIB)
+  targets:
+  - id: null
+- id: 6794
+  name: TEST - Service Period Start After PO End (CIB)
+  targets:
+  - id: null
+- id: 6795
+  name: TEST - Service Period Start After PO End (Line Items) (CIB)
+  targets:
+  - id: null
+- id: 6796
+  name: TEST - Service Period End Before PO Start (CIB)
+  targets:
+  - id: null
+- id: 6797
+  name: TEST - Service Period End Before PO Start (Line Items) (CIB)
+  targets:
+  - id: null
+- id: 6798
+  name: TEST - Service Period Start After Document End (CIB)
+  targets:
+  - id: null
+- id: 6799
+  name: TEST - Service Period Start After Document End (Line Items) (CIB)
+  targets:
+  - id: null
+- id: 6800
+  name: TEST - Total Amount Not Equal to Subtotal + Tax + Charges (CIB)
+  targets:
+  - id: null
+- id: 6801
+  name: TEST - Total Amount Not Equal to Line Sum + Tax + Charges (CIB)
+  targets:
+  - id: null
+- id: 6802
+  name: TEST - Total Amount Less Than Subtotal (Tax Invoice) (CIB)
+  targets:
+  - id: null
+- id: 6803
+  name: TEST - Subtotal Not Equal to Sum of Item Totals (CIB)
+  targets:
+  - id: null
+- id: 6804
+  name: TEST - Total Amount Not Equal to Without Tax + Tax (CIB)
+  targets:
+  - id: null
+- id: 6805
+  name: TEST - Total Amount Less Than Without Tax (Tax Invoice) (CIB)
+  targets:
+  - id: null
+- id: 6806
+  name: TEST - Required - Total Amount or Total Without Tax (CIB)
+  targets:
+  - id: null
+- id: 6807
+  name: TEST - Total Without Tax Not Equal to Sum of Item Totals (CIB)
+  targets:
+  - id: null
+- id: 6808
+  name: TEST - Header Tax Not Equal to Sum of Line Taxes and Charges (CIB)
+  targets:
+  - id: null
+- id: 6809
+  name: TEST - Tax Code Required (No Line Items, PO Backed) (CIB)
+  targets:
+  - id: null
+- id: 6810
+  name: TEST - Item Tax Code Required (Line Items, PO Backed) (CIB)
+  targets:
+  - id: null
+- id: 6812
+  name: TEST - ShowHide - Hide Order Item Match (CIB)
+  targets:
+  - id: null
+- id: 6814
+  name: TEST - ShowHide - Hide Tax Code Match (CIB)
+  targets:
+  - id: null
+workspaces:
+- id: 522159
+  name: Coupa Integration Baseline
+  targets:
+  - id: null
+engines:
+- id: 51386
+  name: AP Documents - line level taxation
+  base_path: cib/cib/engines/AP Documents - line level taxation_[51386]
+  targets:
+  - id: null
+  engine_fields:
+  - id: 2637642
+    name: document_type
+    targets:
+    - id: null
+  - id: 2637643
+    name: document_id
+    targets:
+    - id: null
+  - id: 2637644
+    name: date_issue
+    targets:
+    - id: null
+  - id: 2637647
+    name: date_due
+    targets:
+    - id: null
+  - id: 2637648
+    name: terms
+    targets:
+    - id: null
+  - id: 2637649
+    name: recipient_name
+    targets:
+    - id: null
+  - id: 2637650
+    name: recipient_address
+    targets:
+    - id: null
+  - id: 2637651
+    name: recipient_tax_id
+    targets:
+    - id: null
+  - id: 2637652
+    name: sender_name
+    targets:
+    - id: null
+  - id: 2637653
+    name: sender_address
+    targets:
+    - id: null
+  - id: 2637654
+    name: sender_tax_id
+    targets:
+    - id: null
+  - id: 2637655
+    name: iban
+    targets:
+    - id: null
+  - id: 2637656
+    name: bic
+    targets:
+    - id: null
+  - id: 2637657
+    name: account_num
+    targets:
+    - id: null
+  - id: 2637658
+    name: bank_num
+    targets:
+    - id: null
+  - id: 2637659
+    name: original_document_id
+    targets:
+    - id: null
+  - id: 2637660
+    name: original_date_issue
+    targets:
+    - id: null
+  - id: 2637661
+    name: amount_total
+    targets:
+    - id: null
+  - id: 2637662
+    name: amount_total_base
+    targets:
+    - id: null
+  - id: 2637663
+    name: amount_total_tax
+    targets:
+    - id: null
+  - id: 2637664
+    name: tax_rate
+    targets:
+    - id: null
+  - id: 2637645
+    name: header_description
+    targets:
+    - id: null
+  - id: 2637646
+    name: code
+    targets:
+    - id: null
+  - id: 2637665
+    name: charge_amount
+    targets:
+    - id: null
+  - id: 2637666
+    name: charge_tax
+    targets:
+    - id: null
+  - id: 2637667
+    name: charge_tax_rate
+    targets:
+    - id: null
+  - id: 2637668
+    name: currency
+    targets:
+    - id: null
+  - id: 2637669
+    name: order_id
+    targets:
+    - id: null
+  - id: 2637670
+    name: contract_number
+    targets:
+    - id: null
+  - id: 2637671
+    name: service_period
+    targets:
+    - id: null
+  - id: 2637672
+    name: sp_date_start
+    targets:
+    - id: null
+  - id: 2637673
+    name: sp_date_end
+    targets:
+    - id: null
+  - id: 2637674
+    name: item_description
+    targets:
+    - id: null
+  - id: 2637675
+    name: item_quantity
+    targets:
+    - id: null
+  - id: 2637676
+    name: item_amount_base
+    targets:
+    - id: null
+  - id: 2637677
+    name: item_total_base
+    targets:
+    - id: null
+  - id: 2637678
+    name: item_rate
+    targets:
+    - id: null
+  - id: 2637679
+    name: item_tax
+    targets:
+    - id: null
+  - id: 2637680
+    name: item_order_id
+    targets:
+    - id: null
+  - id: 2637681
+    name: item_code
+    targets:
+    - id: null
+  - id: 2637682
+    name: service_period_item
+    targets:
+    - id: null
+  - id: 2637683
+    name: service_period_item_start
+    targets:
+    - id: null
+  - id: 2637684
+    name: service_period_item_end
+    targets:
+    - id: null
+- id: 51385
+  name: AP Documents - header level taxation
+  base_path: cib/cib/engines/AP Documents - header level taxation_[51385]
+  targets:
+  - id: null
+  engine_fields:
+  - id: 2637601
+    name: document_type
+    targets:
+    - id: null
+  - id: 2637602
+    name: document_id
+    targets:
+    - id: null
+  - id: 2637603
+    name: date_issue
+    targets:
+    - id: null
+  - id: 2637606
+    name: date_due
+    targets:
+    - id: null
+  - id: 2637607
+    name: terms
+    targets:
+    - id: null
+  - id: 2637608
+    name: recipient_name
+    targets:
+    - id: null
+  - id: 2637609
+    name: recipient_address
+    targets:
+    - id: null
+  - id: 2637610
+    name: recipient_tax_id
+    targets:
+    - id: null
+  - id: 2637611
+    name: sender_name
+    targets:
+    - id: null
+  - id: 2637612
+    name: sender_address
+    targets:
+    - id: null
+  - id: 2637613
+    name: sender_remit_to_address
+    targets:
+    - id: null
+  - id: 2637614
+    name: sender_tax_id
+    targets:
+    - id: null
+  - id: 2637615
+    name: iban
+    targets:
+    - id: null
+  - id: 2637616
+    name: bic
+    targets:
+    - id: null
+  - id: 2637617
+    name: account_num
+    targets:
+    - id: null
+  - id: 2637618
+    name: bank_num
+    targets:
+    - id: null
+  - id: 2637619
+    name: original_document_id
+    targets:
+    - id: null
+  - id: 2637620
+    name: original_date_issue
+    targets:
+    - id: null
+  - id: 2637621
+    name: amount_total
+    targets:
+    - id: null
+  - id: 2637622
+    name: amount_total_base
+    targets:
+    - id: null
+  - id: 2637623
+    name: amount_total_tax
+    targets:
+    - id: null
+  - id: 2637624
+    name: shipping_charge
+    targets:
+    - id: null
+  - id: 2637625
+    name: handling_charge
+    targets:
+    - id: null
+  - id: 2637626
+    name: misc_charge
+    targets:
+    - id: null
+  - id: 2637627
+    name: currency
+    targets:
+    - id: null
+  - id: 2637628
+    name: order_id
+    targets:
+    - id: null
+  - id: 2637629
+    name: contract_number
+    targets:
+    - id: null
+  - id: 2637630
+    name: service_period
+    targets:
+    - id: null
+  - id: 2637631
+    name: sp_date_start
+    targets:
+    - id: null
+  - id: 2637632
+    name: sp_date_end
+    targets:
+    - id: null
+  - id: 2637604
+    name: header_description
+    targets:
+    - id: null
+  - id: 2637605
+    name: code
+    targets:
+    - id: null
+  - id: 2637633
+    name: item_description
+    targets:
+    - id: null
+  - id: 2637634
+    name: item_quantity
+    targets:
+    - id: null
+  - id: 2637635
+    name: item_amount_base
+    targets:
+    - id: null
+  - id: 2637636
+    name: item_total_base
+    targets:
+    - id: null
+  - id: 2637637
+    name: item_order_id
+    targets:
+    - id: null
+  - id: 2637638
+    name: item_code
+    targets:
+    - id: null
+  - id: 2637639
+    name: service_period_item_start
+    targets:
+    - id: null
+  - id: 2637640
+    name: service_period_item_end
+    targets:
+    - id: null
+  - id: 2637641
+    name: service_period_item
+    targets:
+    - id: null
