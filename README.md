@@ -1,6 +1,6 @@
 # CIB Init Script
 
-Deploys the [Coupa Integration Baseline (CIB)](https://rossum.university/docs/learn/coupa/integration-setup) to a target Rossum organisation.
+Deploys the [Coupa Integration Baseline (CIB)](https://knowledge-base.rossum.ai/docs/coupa-integration-baseline-cib) to a target Rossum organisation.
 
 ## What it does
 
