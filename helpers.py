@@ -9,6 +9,7 @@ import zipfile
 from rossum_api import APIClientError
 from urllib.parse import urlparse
 import subprocess
+import socket
 import os
 
 HOOKS = os.path.join('_config', 'hooks.csv')
@@ -29,6 +30,64 @@ else:
 def base_url(url: str) -> str:
     p = urlparse(url)
     return f"{p.scheme}://{p.netloc}"
+
+
+# Canonical cluster host -> target_rossum_instance region key.
+CLUSTER_HOSTS = {
+    "elis.rossum.ai": "prod-eu",
+    "shared-eu2.rossum.app": "prod-eu2",
+    "us.app.rossum.ai": "prod-us2",
+    "shared-jp.app.rossum.ai": "prod-jp",
+}
+
+
+def detect_region(api_base_url):
+    """Best-effort detect the org's cluster/region from its API URL via DNS.
+
+    A real org's domain (incl. vanity domains) resolves, via CNAME, to its
+    cluster's canonical host; for anything else we fall back to matching the
+    resolved IP set against the known cluster hosts (resolved live, since the
+    load-balancer IPs rotate). Returns a region key or None if undetermined.
+    """
+    host = urlparse(api_base_url).netloc.split("@")[-1].split(":")[0]
+    try:
+        canonical, _, ips = socket.gethostbyname_ex(host)
+    except OSError:
+        return None
+    if canonical in CLUSTER_HOSTS:
+        return CLUSTER_HOSTS[canonical]
+    org_ips = set(ips)
+    for cluster_host, region in CLUSTER_HOSTS.items():
+        try:
+            if org_ips & set(socket.gethostbyname_ex(cluster_host)[2]):
+                return region
+        except OSError:
+            continue
+    return None
+
+
+def check_region(rossum):
+    """Fail fast if target_rossum_instance does not match the org's real region.
+
+    Deploying to the wrong region silently breaks Coupa imports (the
+    scheduled-imports service 202s but cannot write back) and mis-points the
+    per-cluster export hooks. Run this before anything is created. If the region
+    cannot be auto-detected (e.g. a custom domain), warn and proceed.
+    """
+    configured = rossum.get("target_rossum_instance")
+    detected = detect_region(rossum["api_base_url"])
+    if detected is None:
+        print(f"  WARNING: could not auto-detect the region for {rossum['api_base_url']} "
+              f"via DNS; proceeding with configured '{configured}'. Verify it is correct.")
+        return
+    if detected != configured:
+        print(f"\nERROR: target_rossum_instance is '{configured}', but {rossum['api_base_url']} "
+              f"resolves to region '{detected}'.")
+        print("Deploying to the wrong region silently breaks Coupa imports and mis-points "
+              "export hooks.")
+        print(f"Set \"target_rossum_instance\": \"{detected}\" in config.json and re-run.")
+        sys.exit(1)
+    print(f"  Region check OK: '{configured}' matches the org's API domain.")
 
 def update_prd_credentials(target_token, path):
     # Source credentials — placeholder token, --ld skips source API validation
