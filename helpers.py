@@ -9,6 +9,7 @@ import zipfile
 from rossum_api import APIClientError
 from urllib.parse import urlparse
 import subprocess
+import time
 import os
 
 HOOKS = os.path.join('_config', 'hooks.csv')
@@ -443,3 +444,58 @@ def handle_memorisation_datasets(token, base_api_url):
         print(f"  Index {name}/__dynamic_index: {'created' if resp.ok else f'skipped ({resp.status_code})'}")
 
     print("Memorisation datasets done.")
+
+
+def verify_imports(rossum, client, wait_s=180, poll_s=20):
+    """Smoke-check that every invoked Coupa import actually wrote data.
+
+    The scheduled-imports service returns HTTP 202 even when it cannot write
+    back to the org (e.g. a target_rossum_instance that does not match the
+    org's region), so a misconfigured deploy looks successful while importing
+    nothing. A dataset collection only exists once rows are written, so the
+    presence of each import's dataset_name in data storage is the signal.
+    Warns loudly on anything missing; does not abort (imports are async).
+    """
+    invoked = {h["hook_name"] for h in csv_to_dict(HOOKS) if h.get("invoke") == "true"}
+    datasets = {}
+    for hook_rossum in client.list_hooks():
+        if hook_rossum.name in invoked:
+            import_config = (hook_rossum.settings or {}).get("import_config") or {}
+            name = import_config.get("dataset_name")
+            if name:
+                datasets[name] = hook_rossum.name
+    if not datasets:
+        return
+
+    list_url = base_url(rossum["api_base_url"]) + "/svc/data-storage/api/v1/collections/list"
+    headers = {"Authorization": f"Bearer {rossum['target_org_token']}"}
+    print(f"\nVerifying {len(datasets)} Coupa import dataset(s) landed (up to {wait_s}s)...")
+
+    def landed(existing, name):
+        # collection present, or still importing (svc writes a __tmp_<name> first)
+        return name in existing or any(c.startswith(f"__tmp_{name}") for c in existing)
+
+    pending = set(datasets)
+    waited = 0
+    while True:
+        try:
+            resp = requests.post(list_url, headers=headers, json={}, timeout=30)
+            existing = set(resp.json().get("result", [])) if resp.ok else set()
+        except requests.RequestException:
+            existing = set()
+        pending = {d for d in pending if not landed(existing, d)}
+        if not pending or waited >= wait_s:
+            break
+        time.sleep(poll_s)
+        waited += poll_s
+
+    if pending:
+        print("\n  WARNING: no data found for these Coupa import dataset(s):")
+        for name in sorted(pending):
+            print(f"    - {name}  (hook: {datasets[name]})")
+        print("  The import returns HTTP 202 even when the scheduled-imports service")
+        print("  cannot write back (commonly a target_rossum_instance that does not")
+        print("  match the org's region). Check target_rossum_instance and the hook")
+        print("  logs, then re-run. (Imports are async — re-check if still in progress.)")
+    else:
+        print("  All Coupa import datasets present.")
