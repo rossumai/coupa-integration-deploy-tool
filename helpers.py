@@ -268,6 +268,7 @@ def handle_hooks(rossum, coupa, client):
                 print(f"  {hook_rossum.name}")
                 settings = hook_rossum.settings
                 if hook["prod-eu-url"]:
+                    target_url = None
                     if rossum['target_rossum_instance'] == 'prod-eu':
                         target_url = hook["prod-eu-url"]
                     elif rossum['target_rossum_instance'] == 'prod-eu2':
@@ -276,8 +277,11 @@ def handle_hooks(rossum, coupa, client):
                         target_url = hook["prod-us2-url"]
                     elif rossum['target_rossum_instance'] == 'prod-jp':
                         target_url = hook["prod-jp-url"]
-                    client.update_part_hook(hook_rossum.id, {"config": {"url": target_url}})
-                    print(f"    -> URL: {target_url}")
+                    if target_url and '/svc/scheduled-imports/' in target_url:
+                        target_url = base_url(rossum['api_base_url']) + urlparse(target_url).path
+                    if target_url:
+                        client.update_part_hook(hook_rossum.id, {"config": {"url": target_url}})
+                        print(f"    -> URL: {target_url}")
                 if 'credentials' in settings and 'client_id' in settings['credentials']:
                     settings['credentials']['client_id'] = coupa['client_id']
                     settings['credentials']['base_api_url'] = coupa['coupa_base_api_url']
