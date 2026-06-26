@@ -13,6 +13,7 @@ import subprocess
 import os
 
 HOOKS = os.path.join('_config', 'hooks.csv')
+REQUIRED_SCOPES_FILE = os.path.join('_config', 'required_scopes.json')
 
 GITHUB_REPO = "rossumai/rossum-coupa-integration"
 DEPLOY_TOOL_REPO = "rossumai/coupa-integration-deploy-tool"
@@ -32,30 +33,22 @@ def base_url(url: str) -> str:
     return f"{p.scheme}://{p.netloc}"
 
 
-# Minimal set of Coupa OAuth scopes CIB needs for all master-data imports plus
-# invoice export. Empirically derived by probing each CIB endpoint with
-# single-scope tokens (Coupa keys scope to the API's owning domain, not the
-# object name — e.g. tax_codes -> common.read, tax_registrations -> invoice.read).
-REQUIRED_CIB_SCOPES = {
-    "core.common.read",          # addresses, lookup_values, payment_terms, tax_codes, uoms
-    "core.accounting.read",      # account_types
-    "core.purchase_order.read",  # purchase_orders, purchase_order_lines
-    "core.supplier.read",        # suppliers, remit_to_addresses
-    "core.contract.read",        # contracts
-    "core.invoice.read",         # tax_registrations, MDH invoice dup-check (export GET)
-    "core.invoice.create",       # invoice export (POST api/invoices)
-}
+def _load_required_scopes():
+    """Load the minimal CIB scope map: {scope -> datasets it unlocks}.
 
-# What each scope unlocks — used to make a missing-scope error actionable.
-SCOPE_UNLOCKS = {
-    "core.common.read": "addresses, lookup_values, payment_terms, tax_codes, uoms",
-    "core.accounting.read": "account_types",
-    "core.purchase_order.read": "purchase_orders, purchase_order_lines",
-    "core.supplier.read": "suppliers, remit_to_addresses",
-    "core.contract.read": "contracts",
-    "core.invoice.read": "tax_registrations, invoice dup-check (export)",
-    "core.invoice.create": "invoice export (POST)",
-}
+    Kept in _config/required_scopes.json rather than hardcoded so the required
+    set can be updated without code changes (and, longer term, shipped inside
+    the CIB release itself). Returns the map, or None if the file is missing or
+    malformed — callers degrade to a best-effort skip rather than aborting.
+    """
+    try:
+        with open(REQUIRED_SCOPES_FILE, encoding="utf-8") as f:
+            scopes = json.load(f).get("required_scopes")
+        if isinstance(scopes, dict) and scopes:
+            return scopes
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 def _decode_token_scopes(access_token):
@@ -86,6 +79,13 @@ def verify_credentials(coupa):
     privilege). A probe error we cannot interpret (network failure, opaque
     non-JWT token) warns and proceeds, matching check_region's best-effort stance.
     """
+    scope_unlocks = _load_required_scopes()
+    if not scope_unlocks:
+        print(f"  WARNING: could not load {REQUIRED_SCOPES_FILE}; "
+              f"skipping Coupa credential scope check.")
+        return
+    required = set(scope_unlocks)
+
     token_url = f"{coupa['coupa_base_api_url']}oauth2/token"
     try:
         resp = requests.post(token_url, data={
@@ -111,15 +111,15 @@ def verify_credentials(coupa):
               f"({e}); credentials are valid but scope was not verified.")
         return
 
-    missing = REQUIRED_CIB_SCOPES - granted
-    extra = granted - REQUIRED_CIB_SCOPES
+    missing = required - granted
+    extra = granted - required
 
     if missing:
         print("\nERROR: the Coupa credential is missing scope(s) CIB requires. The "
               "affected datasets would import/export NOTHING while the hook still "
               "returns HTTP 202:")
         for s in sorted(missing):
-            print(f"    - {s}  -> {SCOPE_UNLOCKS.get(s, '?')}")
+            print(f"    - {s}  -> {scope_unlocks.get(s, '?')}")
         print("Grant the missing scope(s) to the Coupa OAuth app and re-run.")
         sys.exit(1)
 
