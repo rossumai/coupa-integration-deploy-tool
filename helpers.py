@@ -1,3 +1,4 @@
+import base64
 import csv
 import io
 import json
@@ -29,6 +30,104 @@ else:
 def base_url(url: str) -> str:
     p = urlparse(url)
     return f"{p.scheme}://{p.netloc}"
+
+
+# Minimal set of Coupa OAuth scopes CIB needs for all master-data imports plus
+# invoice export. Empirically derived by probing each CIB endpoint with
+# single-scope tokens (Coupa keys scope to the API's owning domain, not the
+# object name — e.g. tax_codes -> common.read, tax_registrations -> invoice.read).
+REQUIRED_CIB_SCOPES = {
+    "core.common.read",          # addresses, lookup_values, payment_terms, tax_codes, uoms
+    "core.accounting.read",      # account_types
+    "core.purchase_order.read",  # purchase_orders, purchase_order_lines
+    "core.supplier.read",        # suppliers, remit_to_addresses
+    "core.contract.read",        # contracts
+    "core.invoice.read",         # tax_registrations, MDH invoice dup-check (export GET)
+    "core.invoice.create",       # invoice export (POST api/invoices)
+}
+
+# What each scope unlocks — used to make a missing-scope error actionable.
+SCOPE_UNLOCKS = {
+    "core.common.read": "addresses, lookup_values, payment_terms, tax_codes, uoms",
+    "core.accounting.read": "account_types",
+    "core.purchase_order.read": "purchase_orders, purchase_order_lines",
+    "core.supplier.read": "suppliers, remit_to_addresses",
+    "core.contract.read": "contracts",
+    "core.invoice.read": "tax_registrations, invoice dup-check (export)",
+    "core.invoice.create": "invoice export (POST)",
+}
+
+
+def _decode_token_scopes(access_token):
+    """Return the set of scopes granted in a Coupa access token.
+
+    Coupa returns the granted scopes in the access_token JWT's `scope` claim,
+    NOT in the token response body (where `scope` is null). Decode the JWT
+    payload (the middle segment, base64url) and split the claim.
+    """
+    payload = access_token.split(".")[1]
+    payload += "=" * (-len(payload) % 4)  # restore base64url padding
+    claim = json.loads(base64.urlsafe_b64decode(payload)).get("scope", "")
+    return set(claim.split())
+
+
+def verify_credentials(coupa):
+    """Fail fast if the Coupa OAuth credentials are invalid or under-scoped.
+
+    A wrong or under-provisioned credential is invisible at run time: the Rossum
+    import hook returns HTTP 202/"completed" regardless, and an empty import
+    dataset looks identical whether the tenant has no rows or the credential
+    simply lacks that endpoint's scope. So verify here, before any resources are
+    created:
+      - request a client_credentials token (catches wrong key/secret -> 401),
+      - decode the granted scopes from the access_token JWT,
+      - diff against REQUIRED_CIB_SCOPES.
+    Missing scopes abort the deploy; extra scopes are an advisory (least
+    privilege). A probe error we cannot interpret (network failure, opaque
+    non-JWT token) warns and proceeds, matching check_region's best-effort stance.
+    """
+    token_url = f"{coupa['coupa_base_api_url']}oauth2/token"
+    try:
+        resp = requests.post(token_url, data={
+            "grant_type": "client_credentials",
+            "client_id": coupa["client_id"],
+            "client_secret": coupa["client_secret"],
+        }, timeout=30)
+    except requests.RequestException as e:
+        print(f"  WARNING: could not reach the Coupa token endpoint ({e}); "
+              f"skipping credential check. Verify Coupa creds manually.")
+        return
+
+    if not resp.ok:
+        print(f"\nERROR: Coupa rejected the OAuth credentials "
+              f"(HTTP {resp.status_code}): {resp.text.strip()[:300]}")
+        print("Check coupa.client_id / coupa.client_secret in config.json and re-run.")
+        sys.exit(1)
+
+    try:
+        granted = _decode_token_scopes(resp.json().get("access_token", ""))
+    except Exception as e:
+        print(f"  WARNING: could not decode granted scopes from the Coupa token "
+              f"({e}); credentials are valid but scope was not verified.")
+        return
+
+    missing = REQUIRED_CIB_SCOPES - granted
+    extra = granted - REQUIRED_CIB_SCOPES
+
+    if missing:
+        print("\nERROR: the Coupa credential is missing scope(s) CIB requires. The "
+              "affected datasets would import/export NOTHING while the hook still "
+              "returns HTTP 202:")
+        for s in sorted(missing):
+            print(f"    - {s}  -> {SCOPE_UNLOCKS.get(s, '?')}")
+        print("Grant the missing scope(s) to the Coupa OAuth app and re-run.")
+        sys.exit(1)
+
+    if extra:
+        print(f"  NOTE: the Coupa credential holds {len(extra)} scope(s) beyond what "
+              f"CIB uses (least-privilege): {' '.join(sorted(extra))}")
+    print("  Coupa credential OK: valid and scoped for all CIB imports + export.")
+
 
 def update_prd_credentials(target_token, path):
     # Source credentials — placeholder token, --ld skips source API validation
