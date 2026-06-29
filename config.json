@@ -3,7 +3,7 @@
     "org_id": 1324567,
     "api_base_url": "https://<customer>.rossum.app/api/v1",
     "target_rossum_instance": "prod-eu",
-    "token_owner_username": "martin.kazik@coupa.com",
+    "token_owner_username": "admin@yourcompany.com",
     "target_org_token": "",
     "cib_version": "v1.1.0"
   },
