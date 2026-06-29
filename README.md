@@ -15,7 +15,7 @@ The script automatically:
 
 - **Python 3.10 or later** — [python.org](https://www.python.org/downloads/)
 - **pipx** — used to install the prd2 deployment tool
-- **prd2** — the Rossum deployment CLI
+- **prd2 v2.18.1 or later** — the Rossum deployment CLI. This script requires the `--ld` (local deploy) flag, which first ships in **v2.18.1**. Earlier versions fail with `Error: No such option: --ld`.
 
 ### Install pipx
 
@@ -34,11 +34,13 @@ Restart your terminal after running `ensurepath`.
 
 ### Install prd2
 
+prd2 is not published on public PyPI — install it from the GitHub repository, pinning the minimum supported tag:
+
 ```bash
-pipx install deployment-manager
+pipx install git+https://github.com/rossumai/deployment-manager.git@v2.18.1
 ```
 
-Verify the installation:
+Verify the installation (must report **2.18.1 or later**):
 ```bash
 prd2 --version
 ```
@@ -48,8 +50,8 @@ prd2 --version
 ### 1. Clone or download this repository
 
 ```bash
-git clone <repo-url>
-cd cib_init_script
+git clone https://github.com/rossumai/coupa-integration-deploy-tool.git
+cd coupa-integration-deploy-tool
 ```
 
 ### 2. Install Python dependencies

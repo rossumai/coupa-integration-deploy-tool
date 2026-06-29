@@ -31,6 +31,49 @@ def base_url(url: str) -> str:
     p = urlparse(url)
     return f"{p.scheme}://{p.netloc}"
 
+
+def normalize_base_url(url: str) -> str:
+    """Normalise a Coupa base API URL: ensure a scheme and exactly one trailing slash.
+
+    The hook URLs are built by raw f-string concatenation (e.g. f"{url}oauth2/token"),
+    so a scheme-less or non-slash-terminated value silently produces an invalid URL that
+    only fails much later when the import runs. Normalise once, on load.
+    """
+    url = (url or "").strip()
+    if not url:
+        return url
+    if not urlparse(url).scheme:
+        url = "https://" + url
+    return url.rstrip("/") + "/"
+
+
+def check_prd2_available():
+    """Verify prd2 is installed and supports the --ld (local deploy) flag.
+
+    This script runs `prd2 deploy run ... --ld`; the --ld flag first ships in prd2
+    v2.18.1. Abort early with a clear message rather than letting the deploy fail mid-run.
+    """
+    try:
+        proc = subprocess.run(["prd2", "deploy", "run", "--help"], capture_output=True, text=True)
+    except FileNotFoundError:
+        print(
+            "Error: prd2 is not installed or not on PATH.\n"
+            "Install it with:\n"
+            "  pipx install git+https://github.com/rossumai/deployment-manager.git@v2.18.1"
+        )
+        sys.exit(1)
+    if "--ld" not in (proc.stdout + proc.stderr):
+        try:
+            ver = subprocess.run(["prd2", "--version"], capture_output=True, text=True).stdout.strip()
+        except Exception:
+            ver = "unknown"
+        print(
+            f"Error: your prd2 ({ver}) does not support the --ld flag required by this script.\n"
+            "Upgrade to prd2 v2.18.1 or later:\n"
+            "  pipx install --force git+https://github.com/rossumai/deployment-manager.git@v2.18.1"
+        )
+        sys.exit(1)
+
 def update_prd_credentials(target_token, path):
     # Source credentials — placeholder token, --ld skips source API validation
     source_cred_path = os.path.join(path, CIB_ORG_DIR, "credentials.yaml")
@@ -237,6 +280,9 @@ def init_prd_release(client, rossum, coupa):
         sys.stdout.write(line)
         sys.stdout.flush()
     proc.wait()
+    if proc.returncode != 0:
+        print(f"\nError: 'prd2 deploy run' failed (exit code {proc.returncode}). Aborting before hook configuration.")
+        sys.exit(1)
 
 
 def csv_to_dict(csv_file_path):
