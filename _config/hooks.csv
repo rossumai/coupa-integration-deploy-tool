@@ -1,4 +1,4 @@
-hook_name,prod-eu-url,prod-eu2-url,prod-us2-url,proj-jp-url,patch_secret,invoke
+hook_name,prod-eu-url,prod-eu2-url,prod-us2-url,prod-jp-url,patch_secret,invoke
 Coupa Webhook Import - Tax Registrations (CIB),https://elis.rossum.ai/svc/scheduled-imports/api/coupa/v1/import,https://shared-eu2.rossum.app/svc/scheduled-imports/api/coupa/v1/import,https://us.app.rossum.ai/svc/scheduled-imports/api/coupa/v1/import,,true,true
 Coupa Webhook Import - Tax Codes (CIB),https://elis.rossum.ai/svc/scheduled-imports/api/coupa/v1/import,https://shared-eu2.rossum.app/svc/scheduled-imports/api/coupa/v1/import,https://us.app.rossum.ai/svc/scheduled-imports/api/coupa/v1/import,,true,true
 Coupa Webhook Import - Addresses (CIB),https://elis.rossum.ai/svc/scheduled-imports/api/coupa/v1/import,https://shared-eu2.rossum.app/svc/scheduled-imports/api/coupa/v1/import,https://us.app.rossum.ai/svc/scheduled-imports/api/coupa/v1/import,,true,true

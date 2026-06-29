@@ -10,6 +10,8 @@ import zipfile
 from rossum_api import APIClientError
 from urllib.parse import urlparse
 import subprocess
+import socket
+import time
 import os
 
 HOOKS = os.path.join('_config', 'hooks.csv')
@@ -128,6 +130,105 @@ def verify_credentials(coupa):
               f"CIB uses (least-privilege): {' '.join(sorted(extra))}")
     print("  Coupa credential OK: valid and scoped for all CIB imports + export.")
 
+# Canonical cluster host -> target_rossum_instance region key.
+CLUSTER_HOSTS = {
+    "elis.rossum.ai": "prod-eu",
+    "shared-eu2.rossum.app": "prod-eu2",
+    "us.app.rossum.ai": "prod-us2",
+    "shared-jp.app.rossum.ai": "prod-jp",
+}
+
+
+def detect_region(api_base_url):
+    """Best-effort detect the org's cluster/region from its API URL via DNS.
+
+    A real org's domain (incl. vanity domains) resolves, via CNAME, to its
+    cluster's canonical host; for anything else we fall back to matching the
+    resolved IP set against the known cluster hosts (resolved live, since the
+    load-balancer IPs rotate). Returns a region key or None if undetermined.
+    """
+    host = urlparse(api_base_url).netloc.split("@")[-1].split(":")[0]
+    try:
+        canonical, _, ips = socket.gethostbyname_ex(host)
+    except OSError:
+        return None
+    if canonical in CLUSTER_HOSTS:
+        return CLUSTER_HOSTS[canonical]
+    org_ips = set(ips)
+    for cluster_host, region in CLUSTER_HOSTS.items():
+        try:
+            if org_ips & set(socket.gethostbyname_ex(cluster_host)[2]):
+                return region
+        except OSError:
+            continue
+    return None
+
+
+def check_region(rossum):
+    """Fail fast if target_rossum_instance does not match the org's real region.
+
+    Deploying to the wrong region silently breaks Coupa imports (the
+    scheduled-imports service 202s but cannot write back) and mis-points the
+    per-cluster export hooks. Run this before anything is created. If the region
+    cannot be auto-detected (e.g. a custom domain), warn and proceed.
+    """
+    configured = rossum.get("target_rossum_instance")
+    detected = detect_region(rossum["api_base_url"])
+    if detected is None:
+        print(f"  WARNING: could not auto-detect the region for {rossum['api_base_url']} "
+              f"via DNS; proceeding with configured '{configured}'. Verify it is correct.")
+        return
+    if detected != configured:
+        print(f"\nERROR: target_rossum_instance is '{configured}', but {rossum['api_base_url']} "
+              f"resolves to region '{detected}'.")
+        print("Deploying to the wrong region silently breaks Coupa imports and mis-points "
+              "export hooks.")
+        print(f"Set \"target_rossum_instance\": \"{detected}\" in config.json and re-run.")
+        sys.exit(1)
+    print(f"  Region check OK: '{configured}' matches the org's API domain.")
+
+ 
+def normalize_base_url(url: str) -> str:
+    """Normalise a Coupa base API URL: ensure a scheme and exactly one trailing slash.
+
+    The hook URLs are built by raw f-string concatenation (e.g. f"{url}oauth2/token"),
+    so a scheme-less or non-slash-terminated value silently produces an invalid URL that
+    only fails much later when the import runs. Normalise once, on load.
+    """
+    url = (url or "").strip()
+    if not url:
+        return url
+    if not urlparse(url).scheme:
+        url = "https://" + url
+    return url.rstrip("/") + "/"
+
+
+def check_prd2_available():
+    """Verify prd2 is installed and supports the --ld (local deploy) flag.
+
+    This script runs `prd2 deploy run ... --ld`; the --ld flag first ships in prd2
+    v2.18.1. Abort early with a clear message rather than letting the deploy fail mid-run.
+    """
+    try:
+        proc = subprocess.run(["prd2", "deploy", "run", "--help"], capture_output=True, text=True)
+    except FileNotFoundError:
+        print(
+            "Error: prd2 is not installed or not on PATH.\n"
+            "Install it with:\n"
+            "  pipx install git+https://github.com/rossumai/deployment-manager.git@v2.18.1"
+        )
+        sys.exit(1)
+    if "--ld" not in (proc.stdout + proc.stderr):
+        try:
+            ver = subprocess.run(["prd2", "--version"], capture_output=True, text=True).stdout.strip()
+        except Exception:
+            ver = "unknown"
+        print(
+            f"Error: your prd2 ({ver}) does not support the --ld flag required by this script.\n"
+            "Upgrade to prd2 v2.18.1 or later:\n"
+            "  pipx install --force git+https://github.com/rossumai/deployment-manager.git@v2.18.1"
+        )
+        sys.exit(1)
 
 def update_prd_credentials(target_token, path):
     # Source credentials — placeholder token, --ld skips source API validation
@@ -335,6 +436,9 @@ def init_prd_release(client, rossum, coupa):
         sys.stdout.write(line)
         sys.stdout.flush()
     proc.wait()
+    if proc.returncode != 0:
+        print(f"\nError: 'prd2 deploy run' failed (exit code {proc.returncode}). Aborting before hook configuration.")
+        sys.exit(1)
 
 
 def csv_to_dict(csv_file_path):
@@ -367,6 +471,7 @@ def handle_hooks(rossum, coupa, client):
                 print(f"  {hook_rossum.name}")
                 settings = hook_rossum.settings
                 if hook["prod-eu-url"]:
+                    target_url = None
                     if rossum['target_rossum_instance'] == 'prod-eu':
                         target_url = hook["prod-eu-url"]
                     elif rossum['target_rossum_instance'] == 'prod-eu2':
@@ -375,8 +480,11 @@ def handle_hooks(rossum, coupa, client):
                         target_url = hook["prod-us2-url"]
                     elif rossum['target_rossum_instance'] == 'prod-jp':
                         target_url = hook["prod-jp-url"]
-                    client.update_part_hook(hook_rossum.id, {"config": {"url": target_url}})
-                    print(f"    -> URL: {target_url}")
+                    if target_url and '/svc/scheduled-imports/' in target_url:
+                        target_url = base_url(rossum['api_base_url']) + urlparse(target_url).path
+                    if target_url:
+                        client.update_part_hook(hook_rossum.id, {"config": {"url": target_url}})
+                        print(f"    -> URL: {target_url}")
                 if 'credentials' in settings and 'client_id' in settings['credentials']:
                     settings['credentials']['client_id'] = coupa['client_id']
                     settings['credentials']['base_api_url'] = coupa['coupa_base_api_url']
@@ -538,3 +646,58 @@ def handle_memorisation_datasets(token, base_api_url):
         print(f"  Index {name}/__dynamic_index: {'created' if resp.ok else f'skipped ({resp.status_code})'}")
 
     print("Memorisation datasets done.")
+
+
+def verify_imports(rossum, client, wait_s=180, poll_s=20):
+    """Smoke-check that every invoked Coupa import actually wrote data.
+
+    The scheduled-imports service returns HTTP 202 even when it cannot write
+    back to the org (e.g. a target_rossum_instance that does not match the
+    org's region), so a misconfigured deploy looks successful while importing
+    nothing. A dataset collection only exists once rows are written, so the
+    presence of each import's dataset_name in data storage is the signal.
+    Warns loudly on anything missing; does not abort (imports are async).
+    """
+    invoked = {h["hook_name"] for h in csv_to_dict(HOOKS) if h.get("invoke") == "true"}
+    datasets = {}
+    for hook_rossum in client.list_hooks():
+        if hook_rossum.name in invoked:
+            import_config = (hook_rossum.settings or {}).get("import_config") or {}
+            name = import_config.get("dataset_name")
+            if name:
+                datasets[name] = hook_rossum.name
+    if not datasets:
+        return
+
+    list_url = base_url(rossum["api_base_url"]) + "/svc/data-storage/api/v1/collections/list"
+    headers = {"Authorization": f"Bearer {rossum['target_org_token']}"}
+    print(f"\nVerifying {len(datasets)} Coupa import dataset(s) landed (up to {wait_s}s)...")
+
+    def landed(existing, name):
+        # collection present, or still importing (svc writes a __tmp_<name> first)
+        return name in existing or any(c.startswith(f"__tmp_{name}") for c in existing)
+
+    pending = set(datasets)
+    waited = 0
+    while True:
+        try:
+            resp = requests.post(list_url, headers=headers, json={}, timeout=30)
+            existing = set(resp.json().get("result", [])) if resp.ok else set()
+        except requests.RequestException:
+            existing = set()
+        pending = {d for d in pending if not landed(existing, d)}
+        if not pending or waited >= wait_s:
+            break
+        time.sleep(poll_s)
+        waited += poll_s
+
+    if pending:
+        print("\n  WARNING: no data found for these Coupa import dataset(s):")
+        for name in sorted(pending):
+            print(f"    - {name}  (hook: {datasets[name]})")
+        print("  The import returns HTTP 202 even when the scheduled-imports service")
+        print("  cannot write back (commonly a target_rossum_instance that does not")
+        print("  match the org's region). Check target_rossum_instance and the hook")
+        print("  logs, then re-run. (Imports are async — re-check if still in progress.)")
+    else:
+        print("  All Coupa import datasets present.")
