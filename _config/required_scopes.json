@@ -1,0 +1,12 @@
+{
+  "_comment": "Minimal Coupa OAuth scopes CIB needs for all master-data imports plus invoice export. Empirically derived by probing each CIB endpoint with single-scope tokens. Coupa keys scope to the API's owning domain, not the object name (e.g. tax_codes -> common.read, tax_registrations -> invoice.read). Keys are the required scopes; values name the datasets each unlocks (used to make a missing-scope error actionable). This set is a property of the CIB release version; long-term it should ship inside the CIB release itself so it cannot go stale relative to the deployed hooks.",
+  "required_scopes": {
+    "core.common.read": "addresses, lookup_values, payment_terms, tax_codes, uoms",
+    "core.accounting.read": "account_types",
+    "core.purchase_order.read": "purchase_orders, purchase_order_lines",
+    "core.supplier.read": "suppliers, remit_to_addresses",
+    "core.contract.read": "contracts",
+    "core.invoice.read": "tax_registrations, invoice dup-check (export GET)",
+    "core.invoice.create": "invoice export (POST api/invoices)"
+  }
+}

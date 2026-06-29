@@ -1,3 +1,4 @@
+import base64
 import csv
 import io
 import json
@@ -14,6 +15,7 @@ import time
 import os
 
 HOOKS = os.path.join('_config', 'hooks.csv')
+REQUIRED_SCOPES_FILE = os.path.join('_config', 'required_scopes.json')
 
 GITHUB_REPO = "rossumai/rossum-coupa-integration"
 DEPLOY_TOOL_REPO = "rossumai/coupa-integration-deploy-tool"
@@ -32,6 +34,101 @@ def base_url(url: str) -> str:
     p = urlparse(url)
     return f"{p.scheme}://{p.netloc}"
 
+
+def _load_required_scopes():
+    """Load the minimal CIB scope map: {scope -> datasets it unlocks}.
+
+    Kept in _config/required_scopes.json rather than hardcoded so the required
+    set can be updated without code changes (and, longer term, shipped inside
+    the CIB release itself). Returns the map, or None if the file is missing or
+    malformed — callers degrade to a best-effort skip rather than aborting.
+    """
+    try:
+        with open(REQUIRED_SCOPES_FILE, encoding="utf-8") as f:
+            scopes = json.load(f).get("required_scopes")
+        if isinstance(scopes, dict) and scopes:
+            return scopes
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _decode_token_scopes(access_token):
+    """Return the set of scopes granted in a Coupa access token.
+
+    Coupa returns the granted scopes in the access_token JWT's `scope` claim,
+    NOT in the token response body (where `scope` is null). Decode the JWT
+    payload (the middle segment, base64url) and split the claim.
+    """
+    payload = access_token.split(".")[1]
+    payload += "=" * (-len(payload) % 4)  # restore base64url padding
+    claim = json.loads(base64.urlsafe_b64decode(payload)).get("scope", "")
+    return set(claim.split())
+
+
+def verify_credentials(coupa):
+    """Fail fast if the Coupa OAuth credentials are invalid or under-scoped.
+
+    A wrong or under-provisioned credential is invisible at run time: the Rossum
+    import hook returns HTTP 202/"completed" regardless, and an empty import
+    dataset looks identical whether the tenant has no rows or the credential
+    simply lacks that endpoint's scope. So verify here, before any resources are
+    created:
+      - request a client_credentials token (catches wrong key/secret -> 401),
+      - decode the granted scopes from the access_token JWT,
+      - diff against REQUIRED_CIB_SCOPES.
+    Missing scopes abort the deploy; extra scopes are an advisory (least
+    privilege). A probe error we cannot interpret (network failure, opaque
+    non-JWT token) warns and proceeds, matching check_region's best-effort stance.
+    """
+    scope_unlocks = _load_required_scopes()
+    if not scope_unlocks:
+        print(f"  WARNING: could not load {REQUIRED_SCOPES_FILE}; "
+              f"skipping Coupa credential scope check.")
+        return
+    required = set(scope_unlocks)
+
+    token_url = f"{coupa['coupa_base_api_url']}oauth2/token"
+    try:
+        resp = requests.post(token_url, data={
+            "grant_type": "client_credentials",
+            "client_id": coupa["client_id"],
+            "client_secret": coupa["client_secret"],
+        }, timeout=30)
+    except requests.RequestException as e:
+        print(f"  WARNING: could not reach the Coupa token endpoint ({e}); "
+              f"skipping credential check. Verify Coupa creds manually.")
+        return
+
+    if not resp.ok:
+        print(f"\nERROR: Coupa rejected the OAuth credentials "
+              f"(HTTP {resp.status_code}): {resp.text.strip()[:300]}")
+        print("Check coupa.client_id / coupa.client_secret in config.json and re-run.")
+        sys.exit(1)
+
+    try:
+        granted = _decode_token_scopes(resp.json().get("access_token", ""))
+    except Exception as e:
+        print(f"  WARNING: could not decode granted scopes from the Coupa token "
+              f"({e}); credentials are valid but scope was not verified.")
+        return
+
+    missing = required - granted
+    extra = granted - required
+
+    if missing:
+        print("\nERROR: the Coupa credential is missing scope(s) CIB requires. The "
+              "affected datasets would import/export NOTHING while the hook still "
+              "returns HTTP 202:")
+        for s in sorted(missing):
+            print(f"    - {s}  -> {scope_unlocks.get(s, '?')}")
+        print("Grant the missing scope(s) to the Coupa OAuth app and re-run.")
+        sys.exit(1)
+
+    if extra:
+        print(f"  NOTE: the Coupa credential holds {len(extra)} scope(s) beyond what "
+              f"CIB uses (least-privilege): {' '.join(sorted(extra))}")
+    print("  Coupa credential OK: valid and scoped for all CIB imports + export.")
 
 # Canonical cluster host -> target_rossum_instance region key.
 CLUSTER_HOSTS = {
