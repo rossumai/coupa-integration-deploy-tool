@@ -2,7 +2,7 @@ import log_setup  # must be first — sets up stdout/stderr tee to log file
 
 from rossum_api import SyncRossumAPIClient
 from rossum_api.dtos import Token
-from helpers import check_script_version, check_prd2_available, clean_org, handle_hooks, json_to_dict, init_prd_release, handle_memorisation_datasets, normalize_base_url, verify_imports
+from helpers import check_script_version, check_prd2_available, clean_org, handle_hooks, json_to_dict, init_prd_release, handle_memorisation_datasets, normalize_base_url, verify_imports, check_region
 
 _config = json_to_dict('config.json')
 ROSSUM = _config["rossum"]
@@ -14,6 +14,7 @@ check_prd2_available()
 
 
 def deploy_cib():
+    check_region(ROSSUM)
     client = SyncRossumAPIClient(credentials=Token(ROSSUM["target_org_token"]), base_url=ROSSUM["api_base_url"])
     init_prd_release(client, ROSSUM, COUPA)
     handle_hooks(ROSSUM, COUPA, client)
