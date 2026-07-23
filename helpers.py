@@ -432,12 +432,20 @@ def init_prd_release(client, rossum, coupa):
         encoding='utf-8',
         errors='replace',
     )
+    # prd2 prints a "Planning failed" banner and STILL exits 0 when a deploy
+    # aborts during planning (e.g. an invalid token owner or a 403 creating
+    # engines). Relying on the return code alone lets the script march on and
+    # configure hooks against a half-built deploy. Detect the banner too.
+    planning_failed = False
     for line in proc.stdout:
         sys.stdout.write(line)
         sys.stdout.flush()
+        if "Planning failed" in line:
+            planning_failed = True
     proc.wait()
-    if proc.returncode != 0:
-        print(f"\nError: 'prd2 deploy run' failed (exit code {proc.returncode}). Aborting before hook configuration.")
+    if proc.returncode != 0 or planning_failed:
+        detail = f"exit code {proc.returncode}" + ("; planning failed" if planning_failed else "")
+        print(f"\nError: 'prd2 deploy run' failed ({detail}). Aborting before hook configuration.")
         sys.exit(1)
 
 
@@ -621,6 +629,19 @@ def get_user_id_by_name(client, user_name):
     for user in users:
         if user.username == user_name:
             return user.id
+    # Fallback: the configured admin may be an org-external account (e.g. a
+    # Rossum support/SA user) that does not appear in /users but IS the token's
+    # owner. Resolve it via the authenticated user so token_owner_id is never
+    # None — a null owner makes prd2 fall back to an interactive questionary
+    # prompt, which crashes with OSError [Errno 22] on non-TTY stdin and aborts
+    # the whole deploy planning phase.
+    try:
+        me = client.request_json("GET", "auth/user")
+        if me.get("username") == user_name:
+            return me.get("id")
+    except Exception:
+        pass
+    return None
 
 def handle_memorisation_datasets(token, base_api_url):
     print("\nCreating memorisation datasets...")
