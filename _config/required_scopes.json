@@ -7,6 +7,7 @@
     "core.supplier.read": "suppliers, remit_to_addresses",
     "core.contract.read": "contracts",
     "core.invoice.read": "tax_registrations, invoice dup-check (export GET)",
-    "core.invoice.write": "invoice export (POST api/invoices)"
+    "core.invoice.write": "invoice export (POST api/invoices)",
+    "core.invoice.create": "invoice creation (Coupa draft/submit flow)"
   }
 }
