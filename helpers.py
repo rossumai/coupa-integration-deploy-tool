@@ -480,8 +480,13 @@ def handle_hooks(rossum, coupa, client):
                         target_url = hook["prod-us2-url"]
                     elif rossum['target_rossum_instance'] == 'prod-jp':
                         target_url = hook["prod-jp-url"]
-                    if target_url and '/svc/scheduled-imports/' in target_url:
-                        target_url = base_url(rossum['api_base_url']) + urlparse(target_url).path
+                    # The scheduled-imports service is served on the org's cluster
+                    # gateway (e.g. us.app.rossum.ai) — NOT on the org's vanity API
+                    # domain (e.g. <org>.rossum.app), which only fronts /api and
+                    # returns nginx 405 for the /svc/scheduled-imports/ POST. Use the
+                    # per-cluster host from hooks.csv keyed by target_rossum_instance;
+                    # check_region() has already aborted the deploy if that instance
+                    # does not match the org's real region, so this URL is correct.
                     if target_url:
                         client.update_part_hook(hook_rossum.id, {"config": {"url": target_url}})
                         print(f"    -> URL: {target_url}")
@@ -501,8 +506,14 @@ def handle_hooks(rossum, coupa, client):
                     client.update_part_hook(hook_rossum.id, secrets)
                     print(f"    -> Secret patched")
                 if hook['invoke'] == 'true':
-                    client.request("POST", url=f"{rossum['api_base_url']}/hooks/{hook_rossum.id}/invoke")
-                    print(f"    -> Invoked")
+                    try:
+                        client.request("POST", url=f"{rossum['api_base_url']}/hooks/{hook_rossum.id}/invoke")
+                        print(f"    -> Invoked")
+                    except APIClientError as e:
+                        # Best-effort "kick off an initial import now". Never abort the
+                        # whole deploy on one hook — the import also runs on its cron
+                        # schedule, and verify_imports() checks the data actually landed.
+                        print(f"    -> WARNING: invoke failed, continuing ({e})")
     print(f"Hooks done ({matched} configured).")
 
 
