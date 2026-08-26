@@ -257,7 +257,7 @@ def update_prd_mapping(client, rossum_api_url, org_id, admin_user, path, client_
     with open(deploy_file_path) as f:
         data = yaml.safe_load(f)
 
-    data["token_owner_id"] = get_user_id_by_name(client, admin_user)
+    data["token_owner_id"] = resolve_token_owner_id(client, admin_user)
     data["deployed_org_id"] = None
     data["patch_target_org"] = False
     data["target_url"] = rossum_api_url
@@ -640,19 +640,42 @@ def get_user_id_by_name(client, user_name):
     for user in users:
         if user.username == user_name:
             return user.id
-    # Fallback: the configured admin may be an org-external account (e.g. a
-    # Rossum support/SA user) that does not appear in /users but IS the token's
-    # owner. Resolve it via the authenticated user so token_owner_id is never
-    # None — a null owner makes prd2 fall back to an interactive questionary
-    # prompt, which crashes with OSError [Errno 22] on non-TTY stdin and aborts
-    # the whole deploy planning phase.
+
+
+def resolve_token_owner_id(client, user_name):
+    """Resolve the hook token owner, or abort with an actionable message.
+
+    CIB requires a LOCAL admin of the target organization as hook token owner;
+    an external/support account cannot own hook tokens. prd2 validates a
+    configured token_owner_id with GET /users/{id} and, when it is null or not
+    retrievable, falls back to an interactive questionary picker. This tool pipes
+    prd2's stdout, so stdin is not a TTY: that picker dies with
+    OSError [Errno 22], prd2 prints "Planning failed" -- and still exits 0. Fail
+    here instead, while the message can still say what to fix.
+    """
+    user_id = get_user_id_by_name(client, user_name)
+    if user_id is None:
+        print(f"\nERROR: token owner '{user_name}' is not a user in the target "
+              f"organization, so prd2 cannot set the hook token owner.")
+        print("CIB needs a local admin user in the target organization. Create it in "
+              "Rossum, point rossum.token_owner_username in config.json at its "
+              "username, and re-run.")
+        sys.exit(1)
+
+    # prd2's own picker only offers admin / organization_group_admin users, but it
+    # does not re-check an explicitly configured id -- a non-admin owner is accepted
+    # at deploy time and only shows up later as hooks failing. Advisory only.
     try:
-        me = client.request_json("GET", "auth/user")
-        if me.get("username") == user_name:
-            return me.get("id")
-    except Exception:
-        pass
-    return None
+        owner = client.retrieve_user(user_id)
+        admin_urls = {r.url for r in client.list_user_roles()
+                      if r.name in ("admin", "organization_group_admin")}
+        if not admin_urls.intersection(owner.groups):
+            print(f"  WARNING: token owner '{user_name}' is not an admin in the target "
+                  f"organization; CIB expects a local admin, hooks may fail at run time.")
+    except Exception as e:
+        print(f"  NOTE: could not verify that '{user_name}' is an admin ({e}).")
+
+    return user_id
 
 def handle_memorisation_datasets(token, base_api_url):
     print("\nCreating memorisation datasets...")
