@@ -3,6 +3,7 @@ import csv
 import io
 import json
 import logging
+import re
 import requests
 import shutil
 import yaml
@@ -13,9 +14,6 @@ import subprocess
 import socket
 import time
 import os
-
-HOOKS = os.path.join('_config', 'hooks.csv')
-REQUIRED_SCOPES_FILE = os.path.join('_config', 'required_scopes.json')
 
 GITHUB_REPO = "rossumai/rossum-coupa-integration"
 DEPLOY_TOOL_REPO = "rossumai/coupa-integration-deploy-tool"
@@ -35,16 +33,17 @@ def base_url(url: str) -> str:
     return f"{p.scheme}://{p.netloc}"
 
 
-def _load_required_scopes():
+def _load_required_scopes(path):
     """Load the minimal CIB scope map: {scope -> datasets it unlocks}.
 
-    Kept in _config/required_scopes.json rather than hardcoded so the required
-    set can be updated without code changes (and, longer term, shipped inside
-    the CIB release itself). Returns the map, or None if the file is missing or
-    malformed — callers degrade to a best-effort skip rather than aborting.
+    The map is version data — it must describe the hooks of the release being
+    deployed — so it travels with the release (see cib_assets.resolve_assets)
+    rather than being hardcoded here. Returns the map, or None if the file is
+    missing or malformed; callers degrade to a best-effort skip rather than
+    aborting.
     """
     try:
-        with open(REQUIRED_SCOPES_FILE, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             scopes = json.load(f).get("required_scopes")
         if isinstance(scopes, dict) and scopes:
             return scopes
@@ -66,7 +65,7 @@ def _decode_token_scopes(access_token):
     return set(claim.split())
 
 
-def verify_credentials(coupa):
+def verify_credentials(coupa, assets):
     """Fail fast if the Coupa OAuth credentials are invalid or under-scoped.
 
     A wrong or under-provisioned credential is invisible at run time: the Rossum
@@ -81,9 +80,9 @@ def verify_credentials(coupa):
     privilege). A probe error we cannot interpret (network failure, opaque
     non-JWT token) warns and proceeds, matching check_region's best-effort stance.
     """
-    scope_unlocks = _load_required_scopes()
+    scope_unlocks = _load_required_scopes(assets.required_scopes)
     if not scope_unlocks:
-        print(f"  WARNING: could not load {REQUIRED_SCOPES_FILE}; "
+        print(f"  WARNING: could not load {assets.required_scopes}; "
               f"skipping Coupa credential scope check.")
         return
     required = set(scope_unlocks)
@@ -188,6 +187,82 @@ def check_region(rossum):
     print(f"  Region check OK: '{configured}' matches the org's API domain.")
 
  
+def check_org_features(client, rossum, prd_path):
+    """Fail fast when the target organization group cannot host this CIB release.
+
+    CIB's own organization group carries feature flags that a customer org may
+    not have, and the resulting failures are late and misleading:
+
+      - `maximum_hook_timeout`: CIB 2.0's five export-pipeline hooks declare
+        config.timeout_s 360 because the Coupa draft-creation call alone allows
+        320s. Without the flag the org caps at 60 and POST /hooks returns
+        400 "Ensure this value is less than or equal to 60" -- per hook, which
+        prd2 logs inline and then carries on, exiting 0 with no export chain.
+      - `einvoicing` and XML in `store_only_mime_types`: needed for the
+        e-invoicing inbox to accept and parse e-invoice XML. Advisory, because
+        the AP queues work without them.
+
+    Everything here is best-effort: a token that cannot read the organization
+    group warns and proceeds rather than blocking a deploy that might be fine.
+    """
+    # The TARGET org from config.json, not the token owner's own organization:
+    # a support/group-admin token belongs to a different org entirely.
+    try:
+        org = client.request_json("GET", f"organizations/{rossum['org_id']}")
+        group = client.request_json("GET", org["organization_group"])
+    except Exception as e:
+        print(f"  WARNING: could not read the target organization group ({e}); "
+              f"skipping the feature pre-check.")
+        return
+    features = group.get("features") or {}
+
+    needed = _max_hook_timeout_in_release(prd_path)
+    allowed_feature = features.get("maximum_hook_timeout") or {}
+    allowed = allowed_feature.get("seconds", 60) if allowed_feature.get("enabled") else 60
+    if needed > allowed:
+        print(f"\nERROR: this CIB release needs hooks with config.timeout_s up to {needed}s, but "
+              f"organization group '{group.get('name')}' ({group.get('id')}) allows at most "
+              f"{allowed}s.")
+        print("Every hook above the cap is rejected with HTTP 400 'Ensure this value is less than "
+              "or equal to 60'. prd2 logs that per hook and still exits 0, so the deploy would")
+        print("look successful while silently leaving the org with no export pipeline.")
+        print(f"\nAsk Rossum support to enable 'maximum_hook_timeout' ({needed}s) for that "
+              f"organization group, then re-run.")
+        sys.exit(1)
+
+    advisories = []
+    if not (features.get("einvoicing") or {}).get("enabled"):
+        advisories.append("'einvoicing' is not enabled")
+    mime = ((features.get("store_only_mime_types") or {}).get("mime_types") or [])
+    if not any(m.endswith("/xml") for m in mime):
+        advisories.append("no XML type in 'store_only_mime_types'")
+    if advisories:
+        print(f"  NOTE: organization group '{group.get('name')}': {'; '.join(advisories)}. "
+              f"The AP queues are unaffected; the e-invoicing inbox will not process "
+              f"e-invoice XML until Rossum support enables these.")
+    print(f"  Org feature check OK: hook timeout up to {allowed}s available "
+          f"(release needs {needed}s).")
+
+
+def _max_hook_timeout_in_release(prd_path):
+    """Highest config.timeout_s declared by any hook in the release."""
+    hooks_dir = os.path.join(prd_path, CIB_SOURCE_DIR, "hooks")
+    highest = 0
+    if not os.path.isdir(hooks_dir):
+        return highest
+    for filename in os.listdir(hooks_dir):
+        if not filename.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(hooks_dir, filename), encoding="utf-8") as f:
+                timeout = (json.load(f).get("config") or {}).get("timeout_s")
+        except (OSError, ValueError):
+            continue
+        if isinstance(timeout, int):
+            highest = max(highest, timeout)
+    return highest
+
+
 def normalize_base_url(url: str) -> str:
     """Normalise a Coupa base API URL: ensure a scheme and exactly one trailing slash.
 
@@ -252,6 +327,40 @@ def update_prd_credentials(target_token, path):
 
 
 
+# Mirrors prd2's FORBIDDEN_CHARS_REGEX (utils/functions.py). Object directories
+# are named with the stripped form, so this has to match or paths will not resolve.
+FORBIDDEN_PATH_CHARS = re.compile(r"[/\\\"'`]")
+
+
+def templatize_name_id(name, id_):
+    """prd2's on-disk directory/file naming: '<name sans forbidden chars>_[<id>]'."""
+    return f"{re.sub(FORBIDDEN_PATH_CHARS, '', name)}_[{id_}]"
+
+
+def schema_section_children(schema_path, field_ids):
+    """Return which of `field_ids` sit directly under a top-level schema section.
+
+    Mirrors what the JMESPath "content[].children[?id=='X']" would match, so a
+    caller can build attribute overrides that are guaranteed to resolve. An
+    unreadable schema yields nothing, which degrades to "no override" rather
+    than to a failed deploy.
+    """
+    try:
+        with open(schema_path, encoding="utf-8") as f:
+            content = json.load(f).get("content") or []
+    except (OSError, ValueError):
+        return set()
+
+    present = set()
+    for section in content:
+        if not isinstance(section, dict):
+            continue
+        for child in section.get("children") or []:
+            if isinstance(child, dict) and child.get("id") in field_ids:
+                present.add(child["id"])
+    return present
+
+
 def update_prd_mapping(client, rossum_api_url, org_id, admin_user, path, client_id, client_secret, coupa_base_url):
     deploy_file_path = os.path.join(path, "deploy_files", CIB_DEPLOY_FILE)
     with open(deploy_file_path) as f:
@@ -266,17 +375,33 @@ def update_prd_mapping(client, rossum_api_url, org_id, admin_user, path, client_
     for queue in data["queues"]:
         queue["ignore_deploy_warnings"] = True
         queue["targets"][0]["id"] = None
-        queue["inbox"]["targets"][0]["id"] = None
+        if queue.get("inbox"):
+            queue["inbox"]["targets"][0]["id"] = None
         queue["base_path"] = queue["base_path"].replace("cib/cib", CIB_SOURCE_DIR)
-        queue["schema"]["targets"] = [{
-            "id": None,
-            "attribute_override": {
-                "content[].children[?id=='oauth_client_id'].default_value": client_id,
-                "content[].children[?id=='oauth_client_id'].formula": f"'{client_id}'",
-                "content[].children[?id=='coupa_api_base_url'].default_value": coupa_base_url,
-                "content[].children[?id=='coupa_api_base_url'].formula": f"'{coupa_base_url}'"
-            }
-        }]
+
+        # Only override fields the queue's schema actually has. prd2's
+        # perform_search() RAISES on a JMESPath that matches nothing, aborting
+        # the whole deploy during planning -- so a blanket override breaks any
+        # queue without these datapoints. CIB 2.0's E-invoicing Inbox is exactly
+        # that: it never exports, so it carries no Coupa credential fields.
+        schema_path = os.path.join(
+            path, queue["base_path"], "queues",
+            templatize_name_id(queue["name"], queue["id"]), "schema.json")
+        present = schema_section_children(schema_path, {"oauth_client_id", "coupa_api_base_url"})
+        values = {"oauth_client_id": client_id, "coupa_api_base_url": coupa_base_url}
+        override = {}
+        for field_id in sorted(present):
+            value = values[field_id]
+            override[f"content[].children[?id=='{field_id}'].default_value"] = value
+            override[f"content[].children[?id=='{field_id}'].formula"] = f"'{value}'"
+
+        target = {"id": None}
+        if override:
+            target["attribute_override"] = override
+        else:
+            print(f"  NOTE: queue '{queue['name']}' has no Coupa credential fields in its "
+                  f"schema; skipping the credential override for it.")
+        queue["schema"]["targets"] = [target]
 
     for hook in data["hooks"]:
         hook["targets"][0]["id"] = None
@@ -329,7 +454,10 @@ def check_script_version():
         resp = requests.get(f"https://api.github.com/repos/{DEPLOY_TOOL_REPO}/releases/latest", timeout=10)
         resp.raise_for_status()
         latest = resp.json()["tag_name"]
-        if latest == current:
+        # Ordered comparison, not inequality: while a version is in development
+        # the local VERSION runs ahead of the newest published release, and
+        # offering that as an "update" would git-pull the work away.
+        if not is_newer(latest, current):
             return
         print(f"\nA newer version of this deploy script is available: {latest} (you have {current})")
         print(f"Update now? [y/N]: ", end='', flush=True)
@@ -387,40 +515,86 @@ def download_cib_release(version):
     return release_dir
 
 
-def init_prd_release(client, rossum, coupa):
-    version = rossum["cib_version"]
+def parse_version(tag):
+    """Parse 'v2.0.0' or 'v2.0.0-rc1' into a sortable tuple, or None if unparseable.
 
+    Semver ordering: a pre-release sorts BEFORE its final release, so
+    v2.0.0-rc1 < v2.0.0. Encoded as (major, minor, patch, 0, prerelease) vs
+    (major, minor, patch, 1, "").
+    """
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:-(.+))?", (tag or "").strip())
+    if not match:
+        return None
+    major, minor, patch, prerelease = match.groups()
+    return (int(major), int(minor), int(patch), 0 if prerelease else 1, prerelease or "")
+
+
+def is_newer(candidate, current):
+    """True only when `candidate` is strictly newer than `current`.
+
+    Unparseable tags fall back to "different means newer", matching the
+    behaviour this check had before versions could run ahead of the published
+    ones — better to offer a pointless upgrade than to hide a real one.
+    """
+    a, b = parse_version(candidate), parse_version(current)
+    if a is None or b is None:
+        return candidate != current
+    return a > b
+
+
+def select_cib_version(rossum):
+    """Return the CIB version to deploy, offering the latest release if newer.
+
+    Accepting the offer is safe whatever the version: from CIB 2.0 each release
+    carries its own deploy assets, and resolve_assets() aborts rather than
+    pairing a release with another version's object IDs.
+
+    The comparison is ordered, not just inequality. A config pinned to a version
+    that is not published yet — an unreleased 2.0.0 during testing, or a release
+    candidate — must not be offered the older published tag as an "upgrade",
+    because accepting would silently downgrade the deploy and rewrite config.json.
+    """
+    version = rossum["cib_version"]
     try:
         latest = get_latest_cib_version()
-        if latest != version:
-            print(f"\nA newer CIB version is available: {latest} (configured: {version})")
-            print(f"Download and use {latest} instead? [y/N]: ", end='', flush=True)
-            answer = sys.stdin.readline().strip().lower()
-            if answer == 'y':
-                version = latest
-                config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
-                with open(config_path) as f:
-                    cfg = json.load(f)
-                cfg["rossum"]["cib_version"] = latest
-                with open(config_path, "w") as f:
-                    json.dump(cfg, f, indent=2)
-                print(f"config.json updated to {latest}\n")
-            else:
-                print(f"Continuing with configured version {version}\n")
     except Exception as e:
         print(f"Could not check for latest CIB version: {e}")
+        return version
 
-    prd_path = download_cib_release(version)
+    if not is_newer(latest, version):
+        return version
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    print(f"\nA newer CIB version is available: {latest} (configured: {version})")
+    print(f"Download and use {latest} instead? [y/N]: ", end='', flush=True)
+    if sys.stdin.readline().strip().lower() != 'y':
+        print(f"Continuing with configured version {version}\n")
+        return version
+
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    with open(config_path) as f:
+        cfg = json.load(f)
+    cfg["rossum"]["cib_version"] = latest
+    with open(config_path, "w") as f:
+        json.dump(cfg, f, indent=2)
+    print(f"config.json updated to {latest}\n")
+    return latest
+
+
+def init_prd_release(client, rossum, coupa, prd_path, assets):
+    """Stage the resolved deploy assets into the release and run prd2."""
     os.makedirs(os.path.join(prd_path, "deploy_files"), exist_ok=True)
     os.makedirs(os.path.join(prd_path, "deploy_secrets"), exist_ok=True)
     os.makedirs(os.path.join(prd_path, "deploy_states"), exist_ok=True)
-    shutil.copy(os.path.join(script_dir, "_config", CIB_DEPLOY_FILE), os.path.join(prd_path, "deploy_files", CIB_DEPLOY_FILE))
-    shutil.copy(os.path.join(script_dir, "_config", CIB_SECRETS_FILE), os.path.join(prd_path, "deploy_secrets", CIB_SECRETS_FILE))
+    # Copy rather than edit in place: update_prd_mapping mutates the deploy file
+    # (null target IDs, token owner, Coupa credentials), and the resolved assets
+    # must stay pristine so re-runs start from the same baseline.
+    shutil.copy(assets.deploy_file, os.path.join(prd_path, "deploy_files", CIB_DEPLOY_FILE))
+    shutil.copy(assets.secrets_file, os.path.join(prd_path, "deploy_secrets", CIB_SECRETS_FILE))
 
     update_prd_credentials(rossum["target_org_token"], prd_path)
     update_prd_mapping(client, rossum["api_base_url"], rossum["org_id"], rossum["token_owner_username"], prd_path, coupa["client_id"], coupa["client_secret"], coupa["coupa_base_api_url"])
+
+    neutralize_function_hook_templates(prd_path)
 
     deploy_file_path = os.path.join("deploy_files", CIB_DEPLOY_FILE)
     proc = subprocess.Popen(
@@ -449,6 +623,88 @@ def init_prd_release(client, rossum, coupa):
         sys.exit(1)
 
 
+def verify_deployment(client, prd_path):
+    """Abort if prd2 created only part of what the deploy file asked for.
+
+    prd2 reports a per-object create failure inline and then CARRIES ON: the run
+    still exits 0 and prints no "Planning failed" banner, so the existing return
+    code and banner checks both pass. On prod-eu the five Export Pipeline hooks
+    were rejected (config.timeout_s above that organization's 60s cap) and the
+    deploy looked entirely successful while leaving an org with no export chain
+    at all -- every later step then reported OK because it only ever looks at
+    the objects that do exist.
+
+    Compare the deploy file against the target by name. Names are reproduced
+    verbatim by the deploy, and target IDs are not knowable up front, so name is
+    the right key. Duplicates matter as much as absences: a hook created twice
+    is a hook whose configuration went to the wrong copy.
+    """
+    deploy_file_path = os.path.join(prd_path, "deploy_files", CIB_DEPLOY_FILE)
+    try:
+        with open(deploy_file_path) as f:
+            data = yaml.safe_load(f)
+    except (OSError, ValueError) as e:
+        print(f"  WARNING: could not re-read {deploy_file_path} ({e}); skipping deploy verification.")
+        return
+
+    def live(fetch):
+        return [o.name for o in fetch()
+                if o.name and getattr(o, "status", None) != "deletion_requested"]
+
+    groups = [
+        ("workspaces", [w["name"] for w in data.get("workspaces", [])], client.list_workspaces),
+        ("queues", [q["name"] for q in data.get("queues", [])], client.list_queues),
+        ("hooks", [h["name"] for h in data.get("hooks", [])], client.list_hooks),
+        ("rules", [r["name"] for r in data.get("rules", [])], client.list_rules),
+    ]
+
+    problems = []
+    for label, expected, fetch in groups:
+        if not expected:
+            continue
+        try:
+            actual = live(fetch)
+        except APIClientError as e:
+            print(f"  WARNING: could not list {label} to verify the deploy ({e}).")
+            continue
+        counts = {}
+        for name in actual:
+            counts[name] = counts.get(name, 0) + 1
+        missing = sorted(n for n in set(expected) if n not in counts)
+        # The deploy file may legitimately name the same object once, so any
+        # count above the number of times it was requested is a duplicate.
+        requested = {}
+        for name in expected:
+            requested[name] = requested.get(name, 0) + 1
+        duplicated = sorted(n for n in set(expected) if counts.get(n, 0) > requested[n])
+        if missing or duplicated:
+            problems.append((label, len(expected), missing, duplicated))
+
+    if not problems:
+        print("  Deploy verification OK: every object in the deploy file exists in the target org.")
+        return
+
+    print("\nERROR: the deploy is incomplete. prd2 reports per-object failures inline and still")
+    print("exits 0, so this would otherwise look like a successful deploy.")
+    for label, total, missing, duplicated in problems:
+        if missing:
+            print(f"\n  {len(missing)} of {total} {label} were NOT created:")
+            for name in missing:
+                print(f"    - {name}")
+        if duplicated:
+            print(f"\n  {len(duplicated)} {label} exist more than once:")
+            for name in duplicated:
+                print(f"    - {name}")
+    print("\nSearch the log above for 'Error while creating' to see why. A frequent cause is an")
+    print("organization limit the source org does not have -- e.g. CIB 2.0's export pipeline")
+    print("needs config.timeout_s of 360s, which orgs without the extended hook timeout reject")
+    print("with 'Ensure this value is less than or equal to 60'. Those are enabled by Rossum")
+    print("support, not by this script.")
+    print("\nFix the cause, clean the target organization, and re-run. Continuing now would")
+    print("configure only the objects that exist and report success.")
+    sys.exit(1)
+
+
 def csv_to_dict(csv_file_path):
     with open(csv_file_path, mode='r', encoding='utf-8') as csv_file:
         # Read CSV data
@@ -467,9 +723,27 @@ def json_to_dict(json_file_path):
     return data
 
 
-def handle_hooks(rossum, coupa, client):
+def _first_configuration_source(settings):
+    """Return settings.configurations[0].source, or {} if it isn't shaped that way.
+
+    'configurations' is used by several unrelated extensions: MDH lookups nest a
+    'source' dict under each configuration, while Duplicate Handling and Coupa
+    E-Invoicing use the same key for entirely different structures with no
+    'source' at all.
+    """
+    configurations = settings.get('configurations')
+    if not isinstance(configurations, list) or not configurations:
+        return {}
+    first = configurations[0]
+    if not isinstance(first, dict):
+        return {}
+    source = first.get('source')
+    return source if isinstance(source, dict) else {}
+
+
+def handle_hooks(rossum, coupa, client, assets):
     print("\nConfiguring hooks...")
-    hooks = csv_to_dict(HOOKS)
+    hooks = csv_to_dict(assets.hooks_csv)
     hooks_rossum = client.list_hooks()
     matched = 0
     for hook_rossum in hooks_rossum:
@@ -498,17 +772,39 @@ def handle_hooks(rossum, coupa, client):
                     if target_url:
                         client.update_part_hook(hook_rossum.id, {"config": {"url": target_url}})
                         print(f"    -> URL: {target_url}")
-                if 'credentials' in settings and 'client_id' in settings['credentials']:
+                # Coupa credentials live in three different shapes depending on the
+                # extension. Each branch is keyed on the shape rather than on the
+                # hook name, so a new hook using a known shape is handled for free.
+                #
+                # 1. Import webhooks: settings.credentials.{client_id,base_api_url}
+                if isinstance(settings.get('credentials'), dict) and 'client_id' in settings['credentials']:
                     settings['credentials']['client_id'] = coupa['client_id']
                     settings['credentials']['base_api_url'] = coupa['coupa_base_api_url']
                     client.update_part_hook(hook_rossum.id, {"settings": settings})
                     print(f"    -> Coupa credentials updated")
-                if 'configurations' in settings and 'auth' in settings['configurations'][0]['source']:
-                    settings['configurations'][0]['source']['auth']['url'] = f"{coupa['coupa_base_api_url']}oauth2/token"
-                    settings['configurations'][0]['source']['queries'][0]['url'] = f"{coupa['coupa_base_api_url']}api/invoices/"
-                    settings['configurations'][0]['source']['auth']['body']['client_id'] = coupa['client_id']
+                # 2. MDH lookup against the Coupa API: settings.configurations[0].source.auth.
+                #    Other 'configurations' extensions (Duplicate Handling, Coupa
+                #    E-Invoicing) have no 'source' key at all, so walk the shape
+                #    defensively — a bare subscript here used to raise KeyError.
+                source = _first_configuration_source(settings)
+                if isinstance(source.get('auth'), dict):
+                    source['auth']['url'] = f"{coupa['coupa_base_api_url']}oauth2/token"
+                    source['auth'].setdefault('body', {})['client_id'] = coupa['client_id']
+                    queries = source.get('queries')
+                    if isinstance(queries, list) and queries:
+                        queries[0]['url'] = f"{coupa['coupa_base_api_url']}api/invoices/"
                     client.update_part_hook(hook_rossum.id, {"settings": settings})
                     print(f"    -> Import source updated")
+                # 3. E-invoicing status sync on the inbox queue: the credentials sit at
+                #    the top level of settings, because that queue's schema has no
+                #    coupa_api_base_url / oauth_client_id datapoints to read them from.
+                if 'client_id' in settings or 'coupa_base_url' in settings:
+                    if 'client_id' in settings:
+                        settings['client_id'] = coupa['client_id']
+                    if 'coupa_base_url' in settings:
+                        settings['coupa_base_url'] = coupa['coupa_base_api_url']
+                    client.update_part_hook(hook_rossum.id, {"settings": settings})
+                    print(f"    -> Coupa settings updated")
                 if hook["patch_secret"] == 'true':
                     secrets = {"secrets": {"client_secret": coupa["client_secret"]}}
                     client.update_part_hook(hook_rossum.id, secrets)
@@ -523,6 +819,103 @@ def handle_hooks(rossum, coupa, client):
                         # schedule, and verify_imports() checks the data actually landed.
                         print(f"    -> WARNING: invoke failed, continuing ({e})")
     print(f"Hooks done ({matched} configured).")
+
+
+def neutralize_function_hook_templates(prd_path):
+    """Drop `hook_template` from serverless-function hooks before deploying.
+
+    When a hook carries a hook_template, prd2 creates it with
+    POST /hooks/create (name + template + owner + events only) and then PATCHes
+    the real configuration in. That is fine for a webhook, but Rossum provisions
+    a serverless function asynchronously: the new hook sits in status "pending"
+    and the immediate PATCH is rejected with
+
+        400 Function couldn't be updated. Function is in status pending
+
+    prd2 records the create as failed, and its second deploy pass creates
+    ANOTHER hook, which fails the same way. The result is two orphans with no
+    queues and no run_after. In CIB 2.0 that silently breaks the entire export
+    chain, because stages 2-5 all run_after stage 1.
+
+    Without a template prd2 uses the plain POST /hooks path, which creates the
+    function complete in one call. Export Pipeline stages 2-5 already carry no
+    template and deploy correctly, so this only makes stage 1 behave like its
+    siblings. Webhook templates (MDH, Duplicate Handling) are deliberately left
+    alone: they have no provisioning delay, and the store link is worth keeping.
+    """
+    hooks_dir = os.path.join(prd_path, CIB_SOURCE_DIR, "hooks")
+    if not os.path.isdir(hooks_dir):
+        return
+
+    patched = []
+    for filename in sorted(os.listdir(hooks_dir)):
+        if not filename.endswith(".json"):
+            continue
+        hook_path = os.path.join(hooks_dir, filename)
+        try:
+            with open(hook_path, encoding="utf-8") as f:
+                hook = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if hook.get("type") != "function" or not hook.get("hook_template"):
+            continue
+        hook["hook_template"] = None
+        with open(hook_path, "w", encoding="utf-8") as f:
+            json.dump(hook, f, indent=2)
+        patched.append(hook.get("name", filename))
+
+    if patched:
+        print(f"  Removed hook_template from {len(patched)} function hook(s) so prd2 creates "
+              f"them in one call (Rossum rejects a PATCH while a function is provisioning):")
+        for name in patched:
+            print(f"    - {name}")
+
+
+# Object-name markers that mean "a CIB deploy already happened here". Matching on
+# the "(CIB)" suffix would miss the queues and workspace, which carry no suffix.
+CIB_MARKERS = ("(CIB)", "Coupa Integration Baseline", "AP Documents")
+
+
+def check_target_org_empty(client):
+    """Abort if the target organisation already contains CIB objects.
+
+    Every run is a fresh create: update_prd_mapping() nulls deployed_org_id and
+    every target id, so a second run against the same organisation builds a
+    duplicate set of queues, hooks and rules rather than updating the first.
+    CIB 2.0 has no in-place upgrade path from 1.x, so the safe behaviour is to
+    stop and let the operator choose a clean org.
+    """
+    def names(fetch):
+        try:
+            # Deleting a queue only marks it 'deletion_requested'; Rossum keeps the
+            # tombstone for up to 24 hours and still lists it. Counting those as
+            # "already deployed" would make an org un-redeployable for a day after
+            # any cleanup, so ignore anything already on its way out.
+            return [o.name for o in fetch()
+                    if o.name and getattr(o, "status", None) != "deletion_requested"]
+        except APIClientError:
+            return []
+
+    found = {
+        "workspaces": [n for n in names(client.list_workspaces) if any(m in n for m in CIB_MARKERS)],
+        "queues": [n for n in names(client.list_queues) if any(m in n for m in CIB_MARKERS)],
+        "hooks": [n for n in names(client.list_hooks) if any(m in n for m in CIB_MARKERS)],
+    }
+    total = sum(len(v) for v in found.values())
+    if not total:
+        print("  Target org check OK: no existing CIB objects found.")
+        return
+
+    print(f"\nERROR: the target organisation already contains {total} CIB object(s):")
+    for kind, items in found.items():
+        if items:
+            shown = ", ".join(sorted(items)[:4])
+            more = f" (+{len(items) - 4} more)" if len(items) > 4 else ""
+            print(f"    {len(items)} {kind}: {shown}{more}")
+    print("\nThis script only performs fresh installs — it would create a second, parallel")
+    print("copy of everything rather than updating what is there. There is no in-place")
+    print("upgrade path from CIB 1.x to 2.0; deploy 2.0 into a clean organisation instead.")
+    sys.exit(1)
 
 
 def prd_release_org(org):
@@ -547,25 +940,51 @@ def clean_org(client, token, api_base_url):
     delete_engines(token, api_base_url)
 
 
+def _delete_all(list_fn, delete_fn, label):
+    """Delete every object from a paginated listing.
+
+    The list endpoints return a LAZY paginated iterator. Deleting while
+    iterating it shifts the remaining pages under the cursor, so a plain
+    `for x in client.list_x(): client.delete_x(x.id)` silently stops after the
+    first page -- on a 144-rule org exactly 100 were removed and 44 survived a
+    "full" wipe. Materialise each sweep before deleting, and repeat until the
+    listing is empty or a sweep makes no progress (objects the API refuses to
+    delete, e.g. schemas still attached to a queue awaiting deletion).
+    """
+    while True:
+        try:
+            batch = list(list_fn())
+        except APIClientError:
+            return
+        if not batch:
+            return
+        deleted = 0
+        for obj in batch:
+            try:
+                delete_fn(obj.id)
+                deleted += 1
+            except APIClientError:
+                continue
+        if not deleted:
+            logging.warning(f"clean_org: {len(batch)} {label} could not be deleted; "
+                            f"they are most likely attached to a queue that is still "
+                            f"scheduled for deletion (up to 24 hours).")
+            return
+
+
 def delete_hooks(client):
-    hooks = client.list_hooks()
-    for hook in hooks:
-        client.delete_hook(hook.id)
+    _delete_all(client.list_hooks, client.delete_hook, "hooks")
 
 
 def delete_queues(client):
-    queues = client.list_queues()
-    for queue in queues:
-        try:
-            client.delete_queue(queue.id)
-        except APIClientError:
-            continue
+    # Queues never disappear immediately -- delete only marks them
+    # 'deletion_requested' -- so filter those out or the sweep never converges.
+    _delete_all(lambda: [q for q in client.list_queues() if q.status != "deletion_requested"],
+                client.delete_queue, "queues")
 
 
 def delete_workspaces(client):
-    workspaces = client.list_workspaces()
-    for workspace in workspaces:
-        client.delete_workspace(workspace.id)
+    _delete_all(client.list_workspaces, client.delete_workspace, "workspaces")
 
 
 def delete_inboxes(token, base_api_url):
@@ -592,25 +1011,20 @@ def delete_engines(token, base_api_url):
     for engine in engines:
         response = requests.delete(f"{base_api_url}/engines/{engine['id']}", headers=headers)
         if not response.ok:
+            # Expected on a full wipe: deleting a queue only schedules it for
+            # deletion, and Rossum refuses to drop an engine still attached to
+            # one ("engine_attached_to_queues_waiting_for_deletion") until the
+            # queue is really gone, up to 24 hours later. The orphaned engines
+            # are harmless -- a redeploy creates its own -- but they do linger.
             logging.warning(f"Could not delete engine {engine['id']} ({engine.get('name', '')}): {response.status_code} {response.text}")
 
 
 def delete_rules(client):
-    rules = client.list_rules()
-    for rule in rules:
-        try:
-            client.delete_rule(rule.id)
-        except APIClientError:
-            continue
+    _delete_all(client.list_rules, client.delete_rule, "rules")
 
 
 def delete_schemas(client):
-    schemas = client.list_schemas()
-    for schema in schemas:
-        try:
-            client.delete_schema(schema.id)
-        except APIClientError:
-            continue
+    _delete_all(client.list_schemas, client.delete_schema, "schemas")
 
 
 def delete_annotations(client, token, base_api_url):
@@ -703,7 +1117,7 @@ def handle_memorisation_datasets(token, base_api_url):
     print("Memorisation datasets done.")
 
 
-def verify_imports(rossum, client, wait_s=180, poll_s=20):
+def verify_imports(rossum, client, assets, wait_s=180, poll_s=20):
     """Smoke-check that every invoked Coupa import actually wrote data.
 
     The scheduled-imports service returns HTTP 202 even when it cannot write
@@ -713,7 +1127,7 @@ def verify_imports(rossum, client, wait_s=180, poll_s=20):
     presence of each import's dataset_name in data storage is the signal.
     Warns loudly on anything missing; does not abort (imports are async).
     """
-    invoked = {h["hook_name"] for h in csv_to_dict(HOOKS) if h.get("invoke") == "true"}
+    invoked = {h["hook_name"] for h in csv_to_dict(assets.hooks_csv) if h.get("invoke") == "true"}
     datasets = {}
     for hook_rossum in client.list_hooks():
         if hook_rossum.name in invoked:
