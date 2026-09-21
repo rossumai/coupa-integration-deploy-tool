@@ -198,9 +198,10 @@ def check_org_features(client, rossum, prd_path):
         320s. Without the flag the org caps at 60 and POST /hooks returns
         400 "Ensure this value is less than or equal to 60" -- per hook, which
         prd2 logs inline and then carries on, exiting 0 with no export chain.
-      - `einvoicing` and XML in `store_only_mime_types`: needed for the
-        e-invoicing inbox to accept and parse e-invoice XML. Advisory, because
-        the AP queues work without them.
+      - `einvoicing`: needed for the e-invoicing inbox. Advisory, because the
+        AP queues work without it. Note that the XML mime types the inbox needs
+        are carried in its own queue.accepted_mime_types and deploy with the
+        queue, so they are NOT an org-group prerequisite.
 
     Everything here is best-effort: a token that cannot read the organization
     group warns and proceeds rather than blocking a deploy that might be fine.
@@ -230,16 +231,12 @@ def check_org_features(client, rossum, prd_path):
               f"organization group, then re-run.")
         sys.exit(1)
 
-    advisories = []
-    if not (features.get("einvoicing") or {}).get("enabled"):
-        advisories.append("'einvoicing' is not enabled")
-    mime = ((features.get("store_only_mime_types") or {}).get("mime_types") or [])
-    if not any(m.endswith("/xml") for m in mime):
-        advisories.append("no XML type in 'store_only_mime_types'")
-    if advisories:
-        print(f"  NOTE: organization group '{group.get('name')}': {'; '.join(advisories)}. "
-              f"The AP queues are unaffected; the e-invoicing inbox will not process "
-              f"e-invoice XML until Rossum support enables these.")
+    einvoicing = features.get("einvoicing")
+    if not (einvoicing or {}).get("enabled"):
+        state = "absent" if einvoicing is None else f"present but not enabled ({json.dumps(einvoicing)})"
+        print(f"  NOTE: organization group '{group.get('name')}': 'einvoicing' is {state}. "
+              f"The AP queues are unaffected; the e-invoicing inbox will not work until "
+              f"Rossum support enables it.")
     print(f"  Org feature check OK: hook timeout up to {allowed}s available "
           f"(release needs {needed}s).")
 
@@ -304,6 +301,45 @@ def check_prd2_available():
             "  pipx install --force git+https://github.com/rossumai/deployment-manager.git@v2.18.1"
         )
         sys.exit(1)
+
+MIN_ROSSUM_API = "3.16.1"
+
+
+def check_rossum_api_version():
+    """Abort if rossum-api is too old to page an organization's list endpoints.
+
+    Rossum is retiring page-count pagination: an organization whose group lacks
+    the `old_pagination_count` feature returns `pagination` as
+    {next, previous} with no `total_pages`. Clients before 3.16.1 read
+    data["pagination"]["total_pages"] unguarded and every list_* call dies with
+
+        KeyError: 'total_pages'
+
+    which surfaces as a traceback from deep inside the client and looks nothing
+    like a dependency problem. 3.16.1 sends `include_total=true` on list
+    requests, which makes the API return the count again.
+
+    Newer organizations are the ones without the feature, so this bites exactly
+    on fresh customer orgs -- the case that matters most.
+    """
+    try:
+        import importlib.metadata as importlib_metadata
+        installed = importlib_metadata.version("rossum-api")
+    except Exception:
+        return  # cannot determine; let the run proceed rather than block on metadata
+
+    if not is_newer(MIN_ROSSUM_API, installed):
+        return  # installed >= minimum
+
+    print(f"\nError: rossum-api {installed} is too old; this script needs "
+          f"{MIN_ROSSUM_API} or later.")
+    print("Organizations without the 'old_pagination_count' feature omit "
+          "'total_pages' from list responses, and older clients fail every")
+    print("list call with KeyError: 'total_pages'. Upgrade with:")
+    print("  pip install --upgrade 'rossum-api>=" + MIN_ROSSUM_API + "'")
+    print("  (or: pipenv sync, after pulling the current Pipfile.lock)")
+    sys.exit(1)
+
 
 def update_prd_credentials(target_token, path):
     # Source credentials — placeholder token, --ld skips source API validation

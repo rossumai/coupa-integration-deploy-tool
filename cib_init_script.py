@@ -8,7 +8,7 @@ from rossum_api.dtos import Token
 
 from cib_assets import AssetResolutionError, resolve_assets
 from helpers import (check_org_features, check_prd2_available, check_region, check_script_version,
-                     check_target_org_empty,
+                     check_rossum_api_version, check_target_org_empty,
                      download_cib_release, handle_hooks, handle_memorisation_datasets,
                      init_prd_release, json_to_dict, normalize_base_url, select_cib_version, verify_credentials,
                      verify_deployment, verify_imports)
@@ -25,6 +25,7 @@ COUPA["coupa_base_api_url"] = normalize_base_url(COUPA["coupa_base_api_url"])
 
 check_script_version()
 check_prd2_available()
+check_rossum_api_version()
 
 
 def deploy_cib():

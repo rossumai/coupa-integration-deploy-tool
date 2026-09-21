@@ -1,3 +1,7 @@
-rossum-api>=3.12.0
+# 3.16.1+ sends include_total=true on list calls. Organizations without the
+# old_pagination_count feature return pagination as {next, previous} with no
+# total_pages, and earlier clients raise KeyError: 'total_pages' on every
+# list_* call. Do not lower this bound.
+rossum-api>=3.16.1
 pyyaml>=6.0
 requests>=2.32.0
