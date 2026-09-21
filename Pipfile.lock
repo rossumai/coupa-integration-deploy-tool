@@ -507,12 +507,12 @@
         },
         "rossum-api": {
             "hashes": [
-                "sha256:bd579b6acee02fef3b68541caad90cc8b465a4bbbdf8946198d7b5875b7aed40",
-                "sha256:f49ba4cad439d32b13bc157c5867ef1579354f91937fd3fdd24b77b4cd758323"
+                "sha256:4f90e5c2983ea44eb10f30c616520b69462742a6434b7daeecd69a18d0ca2bb4",
+                "sha256:6b4d833f969fde97f5c7005304e5d90121597f804978d134e9413215e250c401"
             ],
             "index": "pypi",
             "markers": "python_version >= '3.10'",
-            "version": "==3.12.0"
+            "version": "==3.16.1"
         },
         "six": {
             "hashes": [

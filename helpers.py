@@ -3,6 +3,7 @@ import csv
 import io
 import json
 import logging
+import re
 import requests
 import shutil
 import yaml
@@ -229,6 +230,72 @@ def check_prd2_available():
             "  pipx install --force git+https://github.com/rossumai/deployment-manager.git@v2.18.1"
         )
         sys.exit(1)
+
+def parse_version(tag):
+    """Parse 'v2.0.0' or 'v2.0.0-rc1' into a sortable tuple, or None if unparseable.
+
+    Semver ordering: a pre-release sorts BEFORE its final release, so
+    v2.0.0-rc1 < v2.0.0. Encoded as (major, minor, patch, 0, prerelease) vs
+    (major, minor, patch, 1, "").
+    """
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:-(.+))?", (tag or "").strip())
+    if not match:
+        return None
+    major, minor, patch, prerelease = match.groups()
+    return (int(major), int(minor), int(patch), 0 if prerelease else 1, prerelease or "")
+
+
+def is_newer(candidate, current):
+    """True only when `candidate` is strictly newer than `current`.
+
+    Unparseable tags fall back to "different means newer", matching the
+    behaviour this check had before versions could run ahead of the published
+    ones — better to offer a pointless upgrade than to hide a real one.
+    """
+    a, b = parse_version(candidate), parse_version(current)
+    if a is None or b is None:
+        return candidate != current
+    return a > b
+
+
+MIN_ROSSUM_API = "3.16.1"
+
+
+def check_rossum_api_version():
+    """Abort if rossum-api is too old to page an organization's list endpoints.
+
+    Rossum is retiring page-count pagination: an organization whose group lacks
+    the `old_pagination_count` feature returns `pagination` as
+    {next, previous} with no `total_pages`. Clients before 3.16.1 read
+    data["pagination"]["total_pages"] unguarded and every list_* call dies with
+
+        KeyError: 'total_pages'
+
+    which surfaces as a traceback from deep inside the client and looks nothing
+    like a dependency problem. 3.16.1 sends `include_total=true` on list
+    requests, which makes the API return the count again.
+
+    Newer organizations are the ones without the feature, so this bites exactly
+    on fresh customer orgs -- the case that matters most.
+    """
+    try:
+        import importlib.metadata as importlib_metadata
+        installed = importlib_metadata.version("rossum-api")
+    except Exception:
+        return  # cannot determine; let the run proceed rather than block on metadata
+
+    if not is_newer(MIN_ROSSUM_API, installed):
+        return  # installed >= minimum
+
+    print(f"\nError: rossum-api {installed} is too old; this script needs "
+          f"{MIN_ROSSUM_API} or later.")
+    print("Organizations without the 'old_pagination_count' feature omit "
+          "'total_pages' from list responses, and older clients fail every")
+    print("list call with KeyError: 'total_pages'. Upgrade with:")
+    print("  pip install --upgrade 'rossum-api>=" + MIN_ROSSUM_API + "'")
+    print("  (or: pipenv sync, after pulling the current Pipfile.lock)")
+    sys.exit(1)
+
 
 def update_prd_credentials(target_token, path):
     # Source credentials — placeholder token, --ld skips source API validation
