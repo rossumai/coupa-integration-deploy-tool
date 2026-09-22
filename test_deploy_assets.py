@@ -15,7 +15,7 @@ import pytest
 
 from cib_assets import (DEPLOY_FILE_NAME, HOOKS_CSV_NAME, REQUIRED_SCOPES_NAME, SECRETS_FILE_NAME,
                         AssetResolutionError, resolve_assets)
-from helpers import (_first_configuration_source, is_newer, neutralize_function_hook_templates,
+from helpers import (_first_configuration_source, is_newer, neutralize_unresolvable_hook_templates,
                      parse_version, schema_section_children)
 
 ASSET_NAMES = (DEPLOY_FILE_NAME, SECRETS_FILE_NAME, HOOKS_CSV_NAME, REQUIRED_SCOPES_NAME)
@@ -211,38 +211,98 @@ def test_unreadable_schema_degrades_to_no_override(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# neutralize_function_hook_templates — avoids the pending-function PATCH race
+# neutralize_unresolvable_hook_templates — avoids two distinct deploy failures
 # --------------------------------------------------------------------------
 
-def _hook(directory, name, hook_type, template):
+class FakeClient:
+    """Resolves only the template ids it was told about."""
+
+    def __init__(self, visible=()):
+        self.visible = {str(v) for v in visible}
+        self.asked = []
+
+    def request_json(self, method, path):
+        template_id = path.rsplit("/", 1)[-1]
+        self.asked.append(template_id)
+        if template_id not in self.visible:
+            raise RuntimeError("404")
+        return {"id": int(template_id)}
+
+
+def _hook(directory, name, hook_type, template, private=None):
     directory.mkdir(parents=True, exist_ok=True)
+    config = {"private": private} if private is not None else {}
     (directory / f"{name}.json").write_text(json.dumps(
-        {"name": name, "type": hook_type, "hook_template": template}))
+        {"name": name, "type": hook_type, "hook_template": template, "config": config}))
 
 
-def test_strips_template_only_from_function_hooks(tmp_path, capsys):
+def _template_of(directory, name):
+    return json.loads((directory / f"{name}.json").read_text())["hook_template"]
+
+
+def test_function_template_always_stripped_even_when_it_resolves(tmp_path):
+    """The pending-provisioning race happens whether or not the template exists."""
     hooks = tmp_path / "cib-org" / "default" / "hooks"
     _hook(hooks, "Export Pipeline - 1", "function", "https://x/api/v1/hook_templates/50")
-    _hook(hooks, "MDH - Main", "webhook", "https://x/api/v1/hook_templates/39")
-    _hook(hooks, "Handle Responses", "function", None)
 
-    neutralize_function_hook_templates(str(tmp_path))
+    neutralize_unresolvable_hook_templates(FakeClient(visible=[50]), str(tmp_path))
 
-    read = lambda n: json.loads((hooks / f"{n}.json").read_text())
-    assert read("Export Pipeline - 1")["hook_template"] is None, "function template must be dropped"
-    assert read("MDH - Main")["hook_template"].endswith("/39"), "webhook template must survive"
-    assert read("Handle Responses")["hook_template"] is None
-    assert "Export Pipeline - 1" in capsys.readouterr().out
+    assert _template_of(hooks, "Export Pipeline - 1") is None
 
 
-def test_is_idempotent_and_quiet_when_nothing_to_do(tmp_path, capsys):
+def test_private_nonfunction_stripped_only_when_template_is_invisible(tmp_path):
+    """An unresolvable template sends prd2 to an interactive picker it cannot use."""
     hooks = tmp_path / "cib-org" / "default" / "hooks"
-    _hook(hooks, "MDH - Main", "webhook", "https://x/api/v1/hook_templates/39")
+    _hook(hooks, "Master Data Import", "job", "https://x/api/v1/hook_templates/55", private=True)
 
-    neutralize_function_hook_templates(str(tmp_path))
+    neutralize_unresolvable_hook_templates(FakeClient(visible=[]), str(tmp_path))
 
-    assert capsys.readouterr().out == ""
+    assert _template_of(hooks, "Master Data Import") is None
+
+
+def test_resolvable_private_template_is_preserved(tmp_path):
+    """MDH and Duplicate Handling must keep creating from their Store template."""
+    hooks = tmp_path / "cib-org" / "default" / "hooks"
+    _hook(hooks, "MDH - Main", "webhook", "https://x/api/v1/hook_templates/39", private=True)
+
+    neutralize_unresolvable_hook_templates(FakeClient(visible=[39]), str(tmp_path))
+
+    assert _template_of(hooks, "MDH - Main").endswith("/39")
+
+
+def test_non_private_nonfunction_is_left_alone(tmp_path):
+    """Without config.private prd2 never opens the picker, so there is nothing to avoid."""
+    hooks = tmp_path / "cib-org" / "default" / "hooks"
+    _hook(hooks, "Public webhook", "webhook", "https://x/api/v1/hook_templates/99", private=False)
+
+    neutralize_unresolvable_hook_templates(FakeClient(visible=[]), str(tmp_path))
+
+    assert _template_of(hooks, "Public webhook").endswith("/99")
+
+
+def test_each_template_is_only_looked_up_once(tmp_path):
+    """Twelve hooks share one template; do not issue twelve identical API calls."""
+    hooks = tmp_path / "cib-org" / "default" / "hooks"
+    for i in range(12):
+        _hook(hooks, f"Import {i:02d}", "job", "https://x/api/v1/hook_templates/55", private=True)
+
+    client = FakeClient(visible=[])
+    neutralize_unresolvable_hook_templates(client, str(tmp_path))
+
+    assert client.asked == ["55"]
+
+
+def test_is_idempotent(tmp_path):
+    hooks = tmp_path / "cib-org" / "default" / "hooks"
+    _hook(hooks, "Master Data Import", "job", "https://x/api/v1/hook_templates/55", private=True)
+    client = FakeClient(visible=[])
+
+    neutralize_unresolvable_hook_templates(client, str(tmp_path))
+    neutralize_unresolvable_hook_templates(client, str(tmp_path))
+
+    assert _template_of(hooks, "Master Data Import") is None
+    assert client.asked == ["55"], "second pass should find nothing left to check"
 
 
 def test_missing_hooks_directory_is_not_fatal(tmp_path):
-    neutralize_function_hook_templates(str(tmp_path))
+    neutralize_unresolvable_hook_templates(FakeClient(), str(tmp_path))

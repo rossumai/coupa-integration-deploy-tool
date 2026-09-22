@@ -630,7 +630,7 @@ def init_prd_release(client, rossum, coupa, prd_path, assets):
     update_prd_credentials(rossum["target_org_token"], prd_path)
     update_prd_mapping(client, rossum["api_base_url"], rossum["org_id"], rossum["token_owner_username"], prd_path, coupa["client_id"], coupa["client_secret"], coupa["coupa_base_api_url"])
 
-    neutralize_function_hook_templates(prd_path)
+    neutralize_unresolvable_hook_templates(client, prd_path)
 
     deploy_file_path = os.path.join("deploy_files", CIB_DEPLOY_FILE)
     proc = subprocess.Popen(
@@ -857,33 +857,65 @@ def handle_hooks(rossum, coupa, client, assets):
     print(f"Hooks done ({matched} configured).")
 
 
-def neutralize_function_hook_templates(prd_path):
-    """Drop `hook_template` from serverless-function hooks before deploying.
+def neutralize_unresolvable_hook_templates(client, prd_path):
+    """Drop `hook_template` where keeping it would break or stall the deploy.
 
-    When a hook carries a hook_template, prd2 creates it with
-    POST /hooks/create (name + template + owner + events only) and then PATCHes
-    the real configuration in. That is fine for a webhook, but Rossum provisions
-    a serverless function asynchronously: the new hook sits in status "pending"
-    and the immediate PATCH is rejected with
+    Two distinct failures, one remedy -- prd2 only consults a template when the
+    hook still carries the reference, so removing it routes the hook down the
+    plain POST /hooks path instead.
 
-        400 Function couldn't be updated. Function is in status pending
+    1. SERVERLESS FUNCTIONS. prd2 creates a templated hook with
+       POST /hooks/create and immediately PATCHes the real configuration in.
+       Rossum provisions a function asynchronously, so the hook is still
+       "pending" and the PATCH is rejected:
+           400 Function couldn't be updated. Function is in status pending
+       prd2 records the create as failed and its second pass creates ANOTHER
+       one, leaving two orphans with no queues and no run_after. Always strip,
+       whether or not the template resolves.
 
-    prd2 records the create as failed, and its second deploy pass creates
-    ANOTHER hook, which fails the same way. The result is two orphans with no
-    queues and no run_after. In CIB 2.0 that silently breaks the entire export
-    chain, because stages 2-5 all run_after stage 1.
+    2. PRIVATE NON-FUNCTION HOOKS WHOSE TEMPLATE THE TARGET CANNOT SEE. prd2
+       falls back to get_hook_template_from_user(), an interactive
+       questionary.select. This script pipes prd2's output, so the prompt waits
+       on a stdin that is not a TTY and the run stalls, then dies with
+       OSError [Errno 22] behind a "Planning failed" banner and exit code 0.
+       Strip only when the template genuinely does not resolve: when it does,
+       creating from it is the correct path and is what CIB's MDH and
+       Duplicate Handling hooks have always done.
 
-    Without a template prd2 uses the plain POST /hooks path, which creates the
-    function complete in one call. Export Pipeline stages 2-5 already carry no
-    template and deploy correctly, so this only makes stage 1 behave like its
-    siblings. Webhook templates (MDH, Duplicate Handling) are deliberately left
-    alone: they have no provisioning delay, and the store link is worth keeping.
+    Template visibility is an organization-group property, so the durable fix
+    for (2) is to have Rossum expose the template to the target group. This
+    keeps the deploy moving meanwhile, and says so.
     """
     hooks_dir = os.path.join(prd_path, CIB_SOURCE_DIR, "hooks")
     if not os.path.isdir(hooks_dir):
         return
 
-    patched = []
+    resolvable = {}
+    undetermined = set()
+
+    def template_resolves(template_id):
+        """True if the template exists, False only on a definite 404.
+
+        Any other failure -- an expired token, a 5xx, a network blip -- means we
+        do not KNOW. Treating that as "missing" would strip every template and
+        silently create every hook the plain way, which is a materially
+        different deployment. On uncertainty keep the template: that is the
+        normal path, and if the API really is unusable the deploy fails loudly
+        a moment later anyway.
+        """
+        if template_id not in resolvable:
+            try:
+                client.request_json("GET", f"hook_templates/{template_id}")
+                resolvable[template_id] = True
+            except Exception as e:
+                if "404" in str(e):
+                    resolvable[template_id] = False
+                else:
+                    undetermined.add(template_id)
+                    resolvable[template_id] = True
+        return resolvable[template_id]
+
+    stripped_functions, stripped_unresolvable = [], {}
     for filename in sorted(os.listdir(hooks_dir)):
         if not filename.endswith(".json"):
             continue
@@ -893,18 +925,49 @@ def neutralize_function_hook_templates(prd_path):
                 hook = json.load(f)
         except (OSError, ValueError):
             continue
-        if hook.get("type") != "function" or not hook.get("hook_template"):
+        if not hook.get("hook_template"):
             continue
+
+        template_id = str(hook["hook_template"]).rstrip("/").rsplit("/", 1)[-1]
+        is_function = hook.get("type") == "function"
+        would_prompt = (not is_function
+                        and (hook.get("config") or {}).get("private")
+                        and not template_resolves(template_id))
+        if not (is_function or would_prompt):
+            continue
+
         hook["hook_template"] = None
         with open(hook_path, "w", encoding="utf-8") as f:
             json.dump(hook, f, indent=2)
-        patched.append(hook.get("name", filename))
+        name = hook.get("name", filename)
+        if is_function:
+            stripped_functions.append(name)
+        else:
+            stripped_unresolvable.setdefault(template_id, []).append(name)
 
-    if patched:
-        print(f"  Removed hook_template from {len(patched)} function hook(s) so prd2 creates "
-              f"them in one call (Rossum rejects a PATCH while a function is provisioning):")
-        for name in patched:
+    if undetermined:
+        print(f"  WARNING: could not determine whether hook_template(s) "
+              f"{', '.join(sorted(undetermined))} are visible to this organization (the API "
+              f"did not answer with a clear 404). Leaving those references in place; if the "
+              f"deploy then stops on a template prompt, that is why.")
+
+    if stripped_functions:
+        print(f"  Removed hook_template from {len(stripped_functions)} function hook(s) so prd2 "
+              f"creates them in one call (Rossum rejects a PATCH while a function is "
+              f"provisioning):")
+        for name in stripped_functions:
             print(f"    - {name}")
+
+    for template_id, names in sorted(stripped_unresolvable.items()):
+        print(f"  WARNING: hook_templates/{template_id} is not visible to this organization, so "
+              f"{len(names)} private hook(s) would have stopped the deploy on an interactive")
+        print(f"  template prompt that cannot be answered. Removed the reference and letting "
+              f"prd2 create them directly:")
+        for name in names:
+            print(f"    - {name}")
+        print(f"  Verify these work afterwards. The durable fix is to have Rossum expose "
+              f"hook_templates/{template_id} to this organization's group.")
+
 
 
 # Object-name markers that mean "a CIB deploy already happened here". Matching on

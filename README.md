@@ -53,14 +53,26 @@ start without it; the rest surface as advisories or at run time.
 | `maximum_hook_timeout` ≥ **360s** | CIB 2.0 export pipeline | Every export-pipeline hook is rejected with `400 Ensure this value is less than or equal to 60`. prd2 logs that per hook and still exits 0 — the deploy looks successful but the organisation has **no export chain at all**. |
 | **External HTTPS egress** from hook functions | Any call to Coupa | Connect timeouts to the Coupa tenant. The deploy succeeds; export fails at run time with `Failed to fetch or parse auth token … timed out`. Arrange it ahead of the deploy — the change takes a few hours to propagate. |
 | `einvoicing` enabled | E-invoicing inbox | The inbox cannot process e-invoice XML. The AP queues are unaffected. |
-| `application/xml` + `text/xml` in `store_only_mime_types` | E-invoicing inbox | Same. |
+| **Store template visibility** for every template CIB uses | Creating hooks from Store extensions | prd2 cannot resolve the template and opens an interactive picker. This script pipes prd2's output, so the prompt cannot be answered: the run stalls, then dies with `OSError [Errno 22]` behind a `Planning failed` banner and exit code 0. The script works around it by dropping the reference and creating the hook directly, but the Store-backed path is the correct one. |
 | A **local admin user** in the target organisation | Hook token owner | The deploy aborts up front: an external or support account cannot own hook tokens. |
 
-The first four are properties of the **organization group**, not the
+All but the last are properties of the **organization group**, not the
 organisation — check them with `GET /api/v1/organization_groups/<id>` and
 compare against the CIB source group. `maximum_hook_timeout` is a commercial
 entitlement (it governs Lambda runtime cost), which is why no customer-side
 token can set it.
+
+Which templates a release needs varies with its hooks. Find them with:
+
+```bash
+grep -ho '"hook_template": "[^"]*"' <release>/cib-org/default/hooks/*.json | sort -u
+```
+
+then check each id resolves in the target: `GET /api/v1/hook_templates/<id>`.
+CIB 2.0 uses 28 (Duplicate Handling), 39 (Master Data Hub), 50 (Export Pipeline
+— Request Processor) and 55 (Coupa master data import). Note the XML mime types
+the e-invoicing inbox needs are **not** an organization-group setting: they
+travel in the queue's own `accepted_mime_types` and deploy with it.
 
 CIB **v1.x** needs only external egress and the local admin — its export runs on
 webhook extensions rather than serverless functions, so the timeout cap does not
