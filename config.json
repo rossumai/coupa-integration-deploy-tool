@@ -5,7 +5,7 @@
     "target_rossum_instance": "prod-eu",
     "token_owner_username": "admin@yourcompany.com",
     "target_org_token": "",
-    "cib_version": "v1.1.0"
+    "cib_version": "v2.0.0"
   },
   "coupa": {
     "coupa_base_api_url": "https://<customer>-test.coupahost.com/",

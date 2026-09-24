@@ -306,3 +306,49 @@ def test_is_idempotent(tmp_path):
 
 def test_missing_hooks_directory_is_not_fatal(tmp_path):
     neutralize_unresolvable_hook_templates(FakeClient(), str(tmp_path))
+
+
+# --------------------------------------------------------------------------
+# Release safety — the entry point must never destroy the target organisation
+# --------------------------------------------------------------------------
+
+def test_entrypoint_never_calls_clean_org():
+    """clean_org() wipes every queue, hook, rule, engine and document in the org.
+
+    It exists for resetting a throwaway test org and is documented as
+    manual-only. A call left at module level runs before deploy_cib() on every
+    single run, so shipping one would destroy a customer's organisation the
+    first time they used the tool -- and it is invisible to secret scanning,
+    because it is behaviour rather than a credential. It reached a release
+    branch exactly this way once, copied in from a working tree mid-test.
+    """
+    import ast
+    import pathlib
+
+    tree = ast.parse(pathlib.Path(__file__).with_name("cib_init_script.py").read_text())
+    called = [
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    ]
+    assert "clean_org" not in called, (
+        "cib_init_script.py calls clean_org(), which would wipe the target "
+        "organisation on every run. Remove it before releasing."
+    )
+
+
+def test_destructive_helpers_are_not_imported_by_the_entrypoint():
+    """Nothing destructive should be one typo away from running."""
+    import ast
+    import pathlib
+
+    tree = ast.parse(pathlib.Path(__file__).with_name("cib_init_script.py").read_text())
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    assert not imported & {"clean_org", "delete_annotations", "delete_queues",
+                           "delete_hooks", "delete_workspaces", "delete_schemas",
+                           "delete_engines", "delete_rules", "delete_inboxes"}

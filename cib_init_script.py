@@ -11,7 +11,7 @@ from helpers import (check_org_features, check_prd2_available, check_region, che
                      check_rossum_api_version, check_target_org_empty,
                      download_cib_release, handle_hooks, handle_memorisation_datasets,
                      init_prd_release, json_to_dict, normalize_base_url, select_cib_version, verify_credentials,
-                     verify_deployment, verify_imports, clean_org)
+                     verify_deployment, verify_imports)
 # clean_org wipes the whole target organisation and is never called automatically.
 # See its docstring in helpers.py before using it, and only in a test org:
 #     from helpers import clean_org
@@ -57,6 +57,4 @@ def deploy_cib():
     verify_imports(ROSSUM, client, assets)
 
 
-client = SyncRossumAPIClient(credentials=Token(ROSSUM["target_org_token"]), base_url=ROSSUM["api_base_url"])
-clean_org(client, ROSSUM["target_org_token"], ROSSUM["api_base_url"])
 deploy_cib()
