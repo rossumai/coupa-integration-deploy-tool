@@ -219,5 +219,5 @@ Edit `config.json` with your environment details:
 | Parameter | Description |
 |---|---|
 | `coupa_base_api_url` | Base URL of the Coupa instance, ending with `/` |
-| `client_id` | Coupa OAuth client ID — provided by the customer ([setup guide](https://rossum.university/docs/learn/coupa/integration-setup)) |
-| `client_secret` | Coupa OAuth client secret — provided by the customer ([setup guide](https://rossum.university/docs/learn/coupa/integration-setup)) |
+| `client_id` | Coupa OAuth client ID — provided by the customer ([setup guide](https://knowledge-base.rossum.ai/docs/integration-setup)) |
+| `client_secret` | Coupa OAuth client secret — provided by the customer ([setup guide](https://knowledge-base.rossum.ai/docs/integration-setup)) |
