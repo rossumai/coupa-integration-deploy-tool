@@ -738,6 +738,10 @@ def verify_deployment(client, prd_path):
     print("support, not by this script.")
     print("\nFix the cause, clean the target organization, and re-run. Continuing now would")
     print("configure only the objects that exist and report success.")
+    print("\nNote what this organization is left holding: a CIB whose hooks were never")
+    print("configured. They still carry the CIB source Coupa base URL and client id, and the")
+    print("master-data imports are already on their two-hourly schedule -- so they will run")
+    print("against the wrong Coupa tenant until the objects above are removed.")
     sys.exit(1)
 
 
@@ -1041,6 +1045,17 @@ def check_target_org_empty(client):
     duplicate set of queues, hooks and rules rather than updating the first.
     CIB 2.0 has no in-place upgrade path from 1.x, so the safe behaviour is to
     stop and let the operator choose a clean org.
+
+    This has to look at every object type verify_deployment() counts, and rules
+    are the trap. Deleting workspaces and queues in the Rossum UI does NOT
+    delete their rules, so a half-cleaned organisation looks empty to a
+    workspace/queue/hook check. It then gets a complete second deploy, and only
+    afterwards does verify_deployment() see two of every rule name and abort --
+    with everything already created. The organisation is left holding a full
+    CIB that no run will ever configure: the hooks still carry the CIB source
+    Coupa base URL and client id, handle_hooks() never runs, and re-running is
+    blocked by this very check. Catching the leftovers here, before prd2
+    creates anything, is what keeps that failure recoverable.
     """
     def names(fetch):
         try:
@@ -1053,13 +1068,28 @@ def check_target_org_empty(client):
         except APIClientError:
             return []
 
+    def cib(fetch):
+        return [n for n in names(fetch) if any(m in n for m in CIB_MARKERS)]
+
     found = {
-        "workspaces": [n for n in names(client.list_workspaces) if any(m in n for m in CIB_MARKERS)],
-        "queues": [n for n in names(client.list_queues) if any(m in n for m in CIB_MARKERS)],
-        "hooks": [n for n in names(client.list_hooks) if any(m in n for m in CIB_MARKERS)],
+        "workspaces": cib(client.list_workspaces),
+        "queues": cib(client.list_queues),
+        "hooks": cib(client.list_hooks),
+        "rules": cib(client.list_rules),
     }
     total = sum(len(v) for v in found.values())
+
+    # Schemas are advisory, not a blocker: verify_deployment() does not count
+    # them, prd2 creates its own for every queue, and a schema still attached to
+    # a queue awaiting deletion cannot be removed for up to 24 hours -- refusing
+    # to deploy over one would make a freshly cleaned org unusable for a day.
+    leftover_schemas = cib(client.list_schemas)
+
     if not total:
+        if leftover_schemas:
+            print(f"  NOTE: {len(leftover_schemas)} CIB schema(s) from an earlier deploy are still "
+                  f"in this organisation. They do not block the deploy (prd2 creates its own) "
+                  f"but are worth cleaning up afterwards.")
         print("  Target org check OK: no existing CIB objects found.")
         return
 
@@ -1069,6 +1099,13 @@ def check_target_org_empty(client):
             shown = ", ".join(sorted(items)[:4])
             more = f" (+{len(items) - 4} more)" if len(items) > 4 else ""
             print(f"    {len(items)} {kind}: {shown}{more}")
+    if found["rules"] and not (found["workspaces"] or found["queues"] or found["hooks"]):
+        print("\nOnly rules are left over. That is what an earlier deploy looks like after its")
+        print("workspaces and queues were deleted in the UI: rules are not removed with them.")
+        print("Deploying on top would create a second copy of every rule, and the post-deploy")
+        print("check would then abort AFTER everything was created -- leaving an organisation")
+        print("whose hooks still point at the CIB source Coupa instance and which cannot be")
+        print("re-run. Delete the leftover rules first.")
     print("\nThis script only performs fresh installs — it would create a second, parallel")
     print("copy of everything rather than updating what is there. There is no in-place")
     print("upgrade path from CIB 1.x to 2.0; deploy 2.0 into a clean organisation instead.")

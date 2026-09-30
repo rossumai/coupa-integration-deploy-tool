@@ -18,6 +18,11 @@ The script automatically:
 > second run would build a parallel copy rather than update the first. There is
 > no in-place upgrade path from CIB 1.x to 2.0 — deploy 2.0 into a clean
 > organisation.
+>
+> When clearing a previous attempt, remember that **deleting the workspaces and
+> queues in the Rossum UI does not delete their rules** — around 50 rules stay
+> behind, invisible from the workspace view. Delete them too; the script checks
+> for them and refuses to start while they are there.
 
 ## CIB versions
 

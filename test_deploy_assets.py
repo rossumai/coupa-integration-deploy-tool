@@ -15,7 +15,7 @@ import pytest
 
 from cib_assets import (DEPLOY_FILE_NAME, HOOKS_CSV_NAME, REQUIRED_SCOPES_NAME, SECRETS_FILE_NAME,
                         AssetResolutionError, resolve_assets)
-from helpers import (_first_configuration_source, check_hook_templates, is_newer,
+from helpers import (_first_configuration_source, check_hook_templates, check_target_org_empty, is_newer,
                      neutralize_function_hook_templates, parse_version,
                      restore_release_to_pristine, schema_section_children)
 
@@ -431,3 +431,90 @@ def test_a_release_without_a_baseline_warns_rather_than_failing(tmp_path, capsys
     (tmp_path / "cib-org").mkdir(parents=True)
     restore_release_to_pristine(str(tmp_path))
     assert "no pristine baseline" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# check_target_org_empty — the pre-flight has to cover everything
+# verify_deployment counts, or the run aborts after the deploy instead of
+# before it
+# --------------------------------------------------------------------------
+
+class _Obj:
+    def __init__(self, name, status=None):
+        self.name = name
+        self.status = status
+
+
+class OrgClient:
+    """Lists whatever it was given, per object type."""
+
+    def __init__(self, workspaces=(), queues=(), hooks=(), rules=(), schemas=()):
+        self._by_kind = {"workspaces": workspaces, "queues": queues,
+                         "hooks": hooks, "rules": rules, "schemas": schemas}
+        self.listed = []
+
+    def _list(self, kind):
+        self.listed.append(kind)
+        return [o if isinstance(o, _Obj) else _Obj(o) for o in self._by_kind[kind]]
+
+    def list_workspaces(self):
+        return self._list("workspaces")
+
+    def list_queues(self):
+        return self._list("queues")
+
+    def list_hooks(self):
+        return self._list("hooks")
+
+    def list_rules(self):
+        return self._list("rules")
+
+    def list_schemas(self):
+        return self._list("schemas")
+
+
+def test_leftover_rules_alone_stop_the_deploy(capsys):
+    """The exact shape of a UI cleanup: workspaces and queues gone, rules left.
+
+    This passed the old check, so the deploy ran, doubled every rule name and
+    only then failed verification — with the whole CIB already created and its
+    hooks still pointing at the CIB source Coupa instance.
+    """
+    client = OrgClient(rules=["Duplicate Detected (CIB)", "Invoice Number Missing (CIB)"])
+    with pytest.raises(SystemExit) as exit_info:
+        check_target_org_empty(client)
+    assert exit_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "2 rules" in out
+    assert "Only rules are left over" in out
+
+
+def test_rules_are_checked_alongside_the_other_object_types():
+    client = OrgClient()
+    check_target_org_empty(client)
+    assert "rules" in client.listed
+
+
+def test_leftover_schemas_do_not_block_a_deploy(capsys):
+    """A schema whose queue is still being deleted cannot be removed for 24h.
+
+    prd2 creates its own schemas and verify_deployment never counts them, so
+    blocking here would cost a day for nothing.
+    """
+    check_target_org_empty(OrgClient(schemas=["AP Documents - BE"]))
+    out = capsys.readouterr().out
+    assert "Target org check OK" in out
+    assert "1 CIB schema(s)" in out
+
+
+def test_a_clean_org_passes_quietly(capsys):
+    check_target_org_empty(OrgClient(workspaces=["Some other workspace"],
+                                     rules=["A customer's own rule"]))
+    out = capsys.readouterr().out
+    assert "Target org check OK" in out
+    assert "NOTE" not in out
+
+
+def test_rules_awaiting_deletion_are_not_counted():
+    client = OrgClient(rules=[_Obj("Duplicate Detected (CIB)", status="deletion_requested")])
+    check_target_org_empty(client)  # must not raise
