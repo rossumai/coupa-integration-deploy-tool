@@ -53,7 +53,7 @@ start without it; the rest surface as advisories or at run time.
 | `maximum_hook_timeout` ≥ **360s** | CIB 2.0 export pipeline | Every export-pipeline hook is rejected with `400 Ensure this value is less than or equal to 60`. prd2 logs that per hook and still exits 0 — the deploy looks successful but the organisation has **no export chain at all**. |
 | **External HTTPS egress** from hook functions | Any call to Coupa | Connect timeouts to the Coupa tenant. The deploy succeeds; export fails at run time with `Failed to fetch or parse auth token … timed out`. Arrange it ahead of the deploy — the change takes a few hours to propagate. |
 | `einvoicing` enabled | E-invoicing inbox | The inbox cannot process e-invoice XML. The AP queues are unaffected. |
-| **Store template visibility** for every template CIB uses | Creating hooks from Store extensions | prd2 cannot resolve the template and opens an interactive picker. This script pipes prd2's output, so the prompt cannot be answered: the run stalls, then dies with `OSError [Errno 22]` behind a `Planning failed` banner and exit code 0. The script works around it by dropping the reference and creating the hook directly, but the Store-backed path is the correct one. |
+| **Store template visibility** for every template CIB uses | Creating hooks from Store extensions | prd2 cannot resolve the template and opens an interactive picker. This script pipes prd2's output, so the prompt cannot be answered: the run stalls, then dies with `OSError [Errno 22]` behind a `Planning failed` banner and exit code 0. **There is no workaround** — the script aborts up front naming the templates. |
 | A **local admin user** in the target organisation | Hook token owner | The deploy aborts up front: an external or support account cannot own hook tokens. |
 
 All but the last are properties of the **organization group**, not the
@@ -61,6 +61,37 @@ organisation — check them with `GET /api/v1/organization_groups/<id>` and
 compare against the CIB source group. `maximum_hook_timeout` is a commercial
 entitlement (it governs Lambda runtime cost), which is why no customer-side
 token can set it.
+
+### Store template visibility
+
+Rossum sets this on the organization group; it is not exposed in the public
+`organization_groups` response and cannot be changed with an admin token. CIB
+needs the group configured as:
+
+```json
+{
+  "included": [
+    "public",
+    "field-manager",
+    "ps_eng_export_pipeline",
+    "ps_eng_write_data_to_mongo",
+    "integrations_team"
+  ],
+  "excluded": [
+    "deprecated"
+  ]
+}
+```
+
+`ps_eng_export_pipeline` covers the Request Processor used by the export chain
+and `integrations_team` the Coupa master-data import job; `public` alone is not
+enough for either. Without them prd2 stalls on a template prompt it cannot be
+given an answer to.
+
+Removing the `hook_template` reference does **not** avoid that prompt. prd2 only
+tries to match when the hook still has one, and the picker is a separate step
+reached whenever nothing matched — so dropping the reference guarantees the
+prompt rather than skipping it. Only visibility fixes it.
 
 Which templates a release needs varies with its hooks. Find them with:
 
