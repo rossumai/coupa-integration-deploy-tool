@@ -7,10 +7,11 @@ from rossum_api import SyncRossumAPIClient
 from rossum_api.dtos import Token
 
 from cib_assets import AssetResolutionError, resolve_assets
-from helpers import (check_org_features, check_prd2_available, check_region, check_script_version,
+from helpers import (check_hook_templates, check_org_features, check_prd2_available, check_region, check_script_version,
                      check_rossum_api_version, check_target_org_empty,
                      download_cib_release, handle_hooks, handle_memorisation_datasets,
-                     init_prd_release, json_to_dict, normalize_base_url, select_cib_version, verify_credentials,
+                     init_prd_release, json_to_dict, normalize_base_url, restore_release_to_pristine,
+                     select_cib_version, verify_credentials,
                      verify_deployment, verify_imports)
 # clean_org wipes the whole target organisation and is never called automatically.
 # See its docstring in helpers.py before using it, and only in a test org:
@@ -36,6 +37,9 @@ def deploy_cib():
     # data is not.
     version = select_cib_version(ROSSUM)
     prd_path = download_cib_release(version)
+    # Undo any edit a previous run left in the cached release, before anything
+    # reads it: a stale edit silently changes what gets deployed.
+    restore_release_to_pristine(prd_path)
     try:
         assets = resolve_assets(prd_path, version, SCRIPT_DIR)
     except AssetResolutionError as e:
@@ -49,6 +53,7 @@ def deploy_cib():
     client = SyncRossumAPIClient(credentials=Token(ROSSUM["target_org_token"]), base_url=ROSSUM["api_base_url"])
     check_target_org_empty(client)
     check_org_features(client, ROSSUM, prd_path)
+    check_hook_templates(client, prd_path)
 
     init_prd_release(client, ROSSUM, COUPA, prd_path, assets)
     verify_deployment(client, prd_path)

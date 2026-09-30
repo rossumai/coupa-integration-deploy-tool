@@ -15,8 +15,9 @@ import pytest
 
 from cib_assets import (DEPLOY_FILE_NAME, HOOKS_CSV_NAME, REQUIRED_SCOPES_NAME, SECRETS_FILE_NAME,
                         AssetResolutionError, resolve_assets)
-from helpers import (_first_configuration_source, is_newer, neutralize_unresolvable_hook_templates,
-                     parse_version, schema_section_children)
+from helpers import (_first_configuration_source, check_hook_templates, is_newer,
+                     neutralize_function_hook_templates, parse_version,
+                     restore_release_to_pristine, schema_section_children)
 
 ASSET_NAMES = (DEPLOY_FILE_NAME, SECRETS_FILE_NAME, HOOKS_CSV_NAME, REQUIRED_SCOPES_NAME)
 
@@ -211,11 +212,11 @@ def test_unreadable_schema_degrades_to_no_override(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# neutralize_unresolvable_hook_templates — avoids two distinct deploy failures
+# Hook templates — prd2 opens an interactive picker whenever nothing matched
 # --------------------------------------------------------------------------
 
 class FakeClient:
-    """Resolves only the template ids it was told about."""
+    """Resolves only the template ids it was told about; 404s on the rest."""
 
     def __init__(self, visible=()):
         self.visible = {str(v) for v in visible}
@@ -225,7 +226,7 @@ class FakeClient:
         template_id = path.rsplit("/", 1)[-1]
         self.asked.append(template_id)
         if template_id not in self.visible:
-            raise RuntimeError("404")
+            raise RuntimeError("[GET] .../hook_templates - HTTP 404 - not found")
         return {"id": int(template_id)}
 
 
@@ -240,72 +241,82 @@ def _template_of(directory, name):
     return json.loads((directory / f"{name}.json").read_text())["hook_template"]
 
 
-def test_function_template_always_stripped_even_when_it_resolves(tmp_path):
-    """The pending-provisioning race happens whether or not the template exists."""
+def test_function_templates_are_stripped(tmp_path):
+    """Avoids prd2 duplicating the hook while the function is still provisioning."""
     hooks = tmp_path / "cib-org" / "default" / "hooks"
     _hook(hooks, "Export Pipeline - 1", "function", "https://x/api/v1/hook_templates/50")
 
-    neutralize_unresolvable_hook_templates(FakeClient(visible=[50]), str(tmp_path))
+    neutralize_function_hook_templates(str(tmp_path))
 
     assert _template_of(hooks, "Export Pipeline - 1") is None
 
 
-def test_private_nonfunction_stripped_only_when_template_is_invisible(tmp_path):
-    """An unresolvable template sends prd2 to an interactive picker it cannot use."""
+def test_private_nonfunction_templates_are_never_stripped(tmp_path):
+    """Stripping one CAUSES the prompt it looks like it avoids.
+
+    prd2 only enters the matching branch when the hook still has a template;
+    the picker is a separate top-level step reached whenever nothing matched.
+    So removing the reference does not skip the picker, it guarantees it.
+    """
     hooks = tmp_path / "cib-org" / "default" / "hooks"
     _hook(hooks, "Master Data Import", "job", "https://x/api/v1/hook_templates/55", private=True)
-
-    neutralize_unresolvable_hook_templates(FakeClient(visible=[]), str(tmp_path))
-
-    assert _template_of(hooks, "Master Data Import") is None
-
-
-def test_resolvable_private_template_is_preserved(tmp_path):
-    """MDH and Duplicate Handling must keep creating from their Store template."""
-    hooks = tmp_path / "cib-org" / "default" / "hooks"
     _hook(hooks, "MDH - Main", "webhook", "https://x/api/v1/hook_templates/39", private=True)
 
-    neutralize_unresolvable_hook_templates(FakeClient(visible=[39]), str(tmp_path))
+    neutralize_function_hook_templates(str(tmp_path))
 
+    assert _template_of(hooks, "Master Data Import").endswith("/55")
     assert _template_of(hooks, "MDH - Main").endswith("/39")
 
 
-def test_non_private_nonfunction_is_left_alone(tmp_path):
-    """Without config.private prd2 never opens the picker, so there is nothing to avoid."""
+def test_invisible_template_on_a_private_hook_aborts(tmp_path):
+    """No workaround exists, so fail up front naming the template."""
     hooks = tmp_path / "cib-org" / "default" / "hooks"
-    _hook(hooks, "Public webhook", "webhook", "https://x/api/v1/hook_templates/99", private=False)
+    _hook(hooks, "Master Data Import", "job", "https://x/api/v1/hook_templates/55", private=True)
 
-    neutralize_unresolvable_hook_templates(FakeClient(visible=[]), str(tmp_path))
+    with pytest.raises(SystemExit) as excinfo:
+        check_hook_templates(FakeClient(visible=[]), str(tmp_path))
 
-    assert _template_of(hooks, "Public webhook").endswith("/99")
+    assert excinfo.value.code == 1
 
 
-def test_each_template_is_only_looked_up_once(tmp_path):
-    """Twelve hooks share one template; do not issue twelve identical API calls."""
+def test_visible_template_passes(tmp_path):
+    hooks = tmp_path / "cib-org" / "default" / "hooks"
+    _hook(hooks, "Master Data Import", "job", "https://x/api/v1/hook_templates/55", private=True)
+
+    check_hook_templates(FakeClient(visible=[55]), str(tmp_path))  # must not raise
+
+
+def test_function_hooks_do_not_gate_the_deploy(tmp_path):
+    """get_hook_template_from_user() returns immediately for a function."""
+    hooks = tmp_path / "cib-org" / "default" / "hooks"
+    _hook(hooks, "Export Pipeline - 1", "function", "https://x/api/v1/hook_templates/50")
+
+    check_hook_templates(FakeClient(visible=[]), str(tmp_path))  # must not raise
+
+
+def test_each_template_is_checked_once(tmp_path):
     hooks = tmp_path / "cib-org" / "default" / "hooks"
     for i in range(12):
         _hook(hooks, f"Import {i:02d}", "job", "https://x/api/v1/hook_templates/55", private=True)
 
-    client = FakeClient(visible=[])
-    neutralize_unresolvable_hook_templates(client, str(tmp_path))
+    client = FakeClient(visible=[55])
+    check_hook_templates(client, str(tmp_path))
 
     assert client.asked == ["55"]
 
 
-def test_is_idempotent(tmp_path):
+def test_an_unclear_api_failure_does_not_block(tmp_path, capsys):
+    """An expired token is not evidence that a template is missing."""
+    class Flaky(FakeClient):
+        def request_json(self, method, path):
+            raise RuntimeError("HTTP 401 - Invalid token.")
+
     hooks = tmp_path / "cib-org" / "default" / "hooks"
     _hook(hooks, "Master Data Import", "job", "https://x/api/v1/hook_templates/55", private=True)
-    client = FakeClient(visible=[])
 
-    neutralize_unresolvable_hook_templates(client, str(tmp_path))
-    neutralize_unresolvable_hook_templates(client, str(tmp_path))
+    check_hook_templates(Flaky(), str(tmp_path))  # must not raise
 
-    assert _template_of(hooks, "Master Data Import") is None
-    assert client.asked == ["55"], "second pass should find nothing left to check"
-
-
-def test_missing_hooks_directory_is_not_fatal(tmp_path):
-    neutralize_unresolvable_hook_templates(FakeClient(), str(tmp_path))
+    assert "could not determine" in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------
@@ -352,3 +363,71 @@ def test_destructive_helpers_are_not_imported_by_the_entrypoint():
     assert not imported & {"clean_org", "delete_annotations", "delete_queues",
                            "delete_hooks", "delete_workspaces", "delete_schemas",
                            "delete_engines", "delete_rules", "delete_inboxes"}
+
+
+# --------------------------------------------------------------------------
+# restore_release_to_pristine — a cached release must not carry edits forward
+# --------------------------------------------------------------------------
+
+def _release(tmp_path, hook_template="https://x/api/v1/hook_templates/55"):
+    """A cached release shaped like download_cib_release() leaves it."""
+    import subprocess
+    hooks = tmp_path / "cib-org" / "default" / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "Import.json").write_text(json.dumps(
+        {"name": "Import", "type": "job", "hook_template": hook_template,
+         "config": {"private": True}}))
+    (tmp_path / ".gitignore").write_text("cib-org/credentials.yaml\ndeploy_secrets/\n")
+    q = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    git = ["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.call(["git", "-C", str(tmp_path), "init", "-q"], **q)
+    subprocess.call(git + ["add", "."], **q)
+    subprocess.call(git + ["commit", "-m", "CIB", "-q", "--no-gpg-sign"], **q)
+    return hooks / "Import.json"
+
+
+def test_an_earlier_runs_edit_is_undone(tmp_path, capsys):
+    """v1.3.0 stripped hook_template and the edit persisted in the cache.
+
+    The next run — even against an organization where the template WAS visible —
+    then had no reference for prd2 to match, so prd2 fell through to an
+    interactive picker. Restoring first is what makes upgrading the script
+    enough to recover, without anyone having to delete the cache by hand.
+    """
+    hook = _release(tmp_path)
+    poisoned = json.loads(hook.read_text())
+    poisoned["hook_template"] = None
+    hook.write_text(json.dumps(poisoned))
+
+    restore_release_to_pristine(str(tmp_path))
+
+    assert json.loads(hook.read_text())["hook_template"].endswith("/55")
+    assert "Restored" in capsys.readouterr().out
+
+
+def test_a_clean_release_is_left_alone_and_silent(tmp_path, capsys):
+    _release(tmp_path)
+    restore_release_to_pristine(str(tmp_path))
+    assert capsys.readouterr().out == ""
+
+
+def test_runtime_directories_survive_the_restore(tmp_path):
+    """deploy_files/, deploy_states/ and target/ are written after the commit."""
+    _release(tmp_path)
+    for name in ("deploy_files", "deploy_states", "target"):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "keep.txt").write_text("written at run time")
+    (tmp_path / "cib-org" / "credentials.yaml").write_text("token: secret")
+
+    restore_release_to_pristine(str(tmp_path))
+
+    for name in ("deploy_files", "deploy_states", "target"):
+        assert (tmp_path / name / "keep.txt").exists(), f"{name} was destroyed"
+    assert (tmp_path / "cib-org" / "credentials.yaml").read_text() == "token: secret"
+
+
+def test_a_release_without_a_baseline_warns_rather_than_failing(tmp_path, capsys):
+    (tmp_path / "cib-org").mkdir(parents=True)
+    restore_release_to_pristine(str(tmp_path))
+    assert "no pristine baseline" in capsys.readouterr().out
