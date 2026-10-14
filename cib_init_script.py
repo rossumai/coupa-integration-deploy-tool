@@ -8,7 +8,7 @@ from rossum_api.dtos import Token
 
 from cib_assets import AssetResolutionError, resolve_assets
 from helpers import (check_hook_templates, check_org_features, check_prd2_available, check_region, check_script_version,
-                     check_rossum_api_version, check_target_org_empty,
+                     check_rossum_api_version, check_target_org_empty, fix_rule_hosts,
                      download_cib_release, handle_hooks, handle_memorisation_datasets,
                      init_prd_release, json_to_dict, normalize_base_url, restore_release_to_pristine,
                      select_cib_version, verify_credentials,
@@ -57,6 +57,7 @@ def deploy_cib():
 
     init_prd_release(client, ROSSUM, COUPA, prd_path, assets)
     verify_deployment(client, prd_path)
+    fix_rule_hosts(client, ROSSUM, prd_path)
     handle_hooks(ROSSUM, COUPA, client, assets)
     handle_memorisation_datasets(token=ROSSUM["target_org_token"], base_api_url=ROSSUM["api_base_url"])
     verify_imports(ROSSUM, client, assets)
