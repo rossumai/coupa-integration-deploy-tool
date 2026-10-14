@@ -3,15 +3,12 @@ import log_setup  # must be first — sets up stdout/stderr tee to log file
 import os
 import sys
 
-from rossum_api import SyncRossumAPIClient
-from rossum_api.dtos import Token
-
 from cib_assets import AssetResolutionError, resolve_assets
 from import_watermark import seed_imports
 from helpers import (check_hook_templates, check_org_features, check_prd2_available, check_region, check_script_version,
                      check_rossum_api_version, check_target_org_empty, fix_rule_hosts,
                      download_cib_release, handle_hooks, handle_memorisation_datasets,
-                     init_prd_release, json_to_dict, normalize_base_url, restore_release_to_pristine,
+                     init_prd_release, json_to_dict, make_client, normalize_base_url, restore_release_to_pristine,
                      select_cib_version, verify_credentials,
                      verify_deployment, verify_imports)
 # clean_org wipes the whole target organisation and is never called automatically.
@@ -55,7 +52,7 @@ def deploy_cib():
     verify_credentials(COUPA, assets)
     check_region(ROSSUM)
 
-    client = SyncRossumAPIClient(credentials=Token(ROSSUM["target_org_token"]), base_url=ROSSUM["api_base_url"])
+    client = make_client(ROSSUM)
     check_target_org_empty(client)
     check_org_features(client, ROSSUM, prd_path)
     check_hook_templates(client, prd_path)

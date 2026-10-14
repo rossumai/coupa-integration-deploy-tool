@@ -8,7 +8,8 @@ import requests
 import shutil
 import yaml
 import zipfile
-from rossum_api import APIClientError
+from rossum_api import APIClientError, SyncRossumAPIClient
+from rossum_api.dtos import Token
 from urllib.parse import urlparse
 import subprocess
 import socket
@@ -340,6 +341,54 @@ def check_rossum_api_version():
     print("  pip install --upgrade 'rossum-api>=" + MIN_ROSSUM_API + "'")
     print("  (or: pipenv sync, after pulling the current Pipfile.lock)")
     sys.exit(1)
+
+
+# Rossum answers HTTP 429 with a Retry-After header once a client goes past its
+# rate limit (600 requests/minute per the API spec; window and key undocumented).
+# rossum-api retries 429 only 3 times with a 1-4 s backoff and never reads
+# Retry-After, so a burst of hook PATCHes died with an APIClientError halfway
+# through handle_hooks: prd2 had created everything, but some hooks kept the CIB
+# source Coupa settings and no memorisation dataset was created.
+API_RETRIES = 8
+MAX_RETRY_AFTER_S = 60
+
+
+def retry_after_s(response):
+    """Seconds a 429 response asks the client to wait, or None.
+
+    Only the delta-seconds form is read; an HTTP-date or a missing header falls
+    back to the caller's own exponential backoff.
+    """
+    if response.status_code != 429:
+        return None
+    try:
+        return min(max(float(response.headers.get("Retry-After")), 0), MAX_RETRY_AFTER_S)
+    except (TypeError, ValueError):
+        return None
+
+
+def _wait_on_retry_after(response):
+    """rossum-api response post-processor: honour Retry-After before the client retries."""
+    delay = retry_after_s(response)
+    if delay:
+        time.sleep(delay)
+
+
+def make_client(rossum):
+    """Rossum API client that survives the rate limit instead of aborting the deploy."""
+    return SyncRossumAPIClient(credentials=Token(rossum["target_org_token"]), base_url=rossum["api_base_url"],
+                               n_retries=API_RETRIES, response_post_processor=_wait_on_retry_after)
+
+
+def send(method, url, **kwargs):
+    """requests.request with the same 429 handling, for the svc/ endpoints the client does not cover."""
+    for attempt in range(API_RETRIES):
+        resp = requests.request(method, url, timeout=60, **kwargs)
+        if resp.status_code != 429:
+            return resp
+        delay = retry_after_s(resp)
+        time.sleep(delay if delay is not None else min(2 ** attempt, MAX_RETRY_AFTER_S))
+    return resp
 
 
 def update_prd_credentials(target_token, path):
@@ -1364,11 +1413,11 @@ def handle_memorisation_datasets(token, base_api_url):
         "_tax_code_memorization",
     ]
     for name in collections:
-        resp = requests.post(create_dataset_url, headers=headers, json={"collectionName": name})
+        resp = send("POST", create_dataset_url, headers=headers, json={"collectionName": name})
         print(f"  Collection {name}: {'created' if resp.ok else f'skipped ({resp.status_code})'}")
 
     for name in collections:
-        resp = requests.post(create_index_url, headers=headers, json={
+        resp = send("POST", create_index_url, headers=headers, json={
             "collectionName": name,
             "indexName": "__dynamic_index",
             "keys": {"$**": 1},
