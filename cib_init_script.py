@@ -65,7 +65,7 @@ def deploy_cib():
     handle_hooks(ROSSUM, COUPA, client, assets)
     seed_imports(client, ROSSUM, started)
     handle_memorisation_datasets(token=ROSSUM["target_org_token"], base_api_url=ROSSUM["api_base_url"])
-    verify_imports(ROSSUM, client, assets)
+    verify_imports(ROSSUM, client, assets, started)
 
 
 deploy_cib()

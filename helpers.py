@@ -14,6 +14,7 @@ import subprocess
 import socket
 import time
 import os
+from datetime import datetime
 
 GITHUB_REPO = "rossumai/rossum-coupa-integration"
 DEPLOY_TOOL_REPO = "rossumai/coupa-integration-deploy-tool"
@@ -1311,15 +1312,63 @@ def handle_memorisation_datasets(token, base_api_url):
     print("Memorisation datasets done.")
 
 
-def verify_imports(rossum, client, assets, wait_s=180, poll_s=20):
+def _parse_ts(value):
+    """MDH timestamps ('2026-10-12T15:29:12.808000Z'); fractions dropped so Python 3.10 parses them."""
+    return datetime.fromisoformat(re.sub(r"\.\d+", "", value).replace("Z", "+00:00"))
+
+
+def _import_operations(rossum, dataset):
+    """MDH operation log of one dataset, newest first; [] when unreadable or never run."""
+    try:
+        resp = requests.get(base_url(rossum["api_base_url"]) + "/svc/master-data-hub/api/v1/operation/",
+                            headers={"Authorization": f"Bearer {rossum['target_org_token']}"},
+                            params={"dataset_name": dataset, "limit": 20}, timeout=30)
+        return resp.json().get("operations", []) if resp.ok else []
+    except (requests.RequestException, ValueError):
+        return []
+
+
+def _has_documents(rossum, collection):
+    try:
+        resp = requests.post(base_url(rossum["api_base_url"]) + "/svc/data-storage/api/v1/data/find",
+                             headers={"Authorization": f"Bearer {rossum['target_org_token']}"},
+                             json={"collectionName": collection, "query": {}, "projection": {"_id": 1},
+                                   "limit": 1},
+                             timeout=30)
+        return bool(resp.ok and resp.json().get("result"))
+    except (requests.RequestException, ValueError):
+        return False
+
+
+def _import_state(rossum, dataset, started):
+    """'data', or the status of the newest import operation of this deploy, or 'not started'.
+
+    An operation from before `started` belongs to an earlier deploy of this
+    organisation and says nothing about this one.
+    """
+    if _has_documents(rossum, dataset):
+        return "data", None
+    ops = [o for o in _import_operations(rossum, dataset)
+           if o.get("create_ts") and _parse_ts(o["create_ts"]) >= started]
+    if not ops:
+        return "not started", None
+    return ops[0].get("status"), ops[0]
+
+
+def verify_imports(rossum, client, assets, started, wait_s=180, poll_s=20):
     """Smoke-check that every invoked Coupa import actually wrote data.
 
-    The scheduled-imports service returns HTTP 202 even when it cannot write
-    back to the org (e.g. a target_rossum_instance that does not match the
-    org's region), so a misconfigured deploy looks successful while importing
-    nothing. A dataset collection only exists once rows are written, so the
-    presence of each import's dataset_name in data storage is the signal.
-    Warns loudly on anything missing; does not abort (imports are async).
+    Neither the hook nor the import job says whether rows arrived: the
+    scheduled-imports service returns HTTP 202 even when it cannot write back
+    (e.g. a target_rossum_instance that does not match the org's region), and
+    an import whose Coupa filter matched nothing still ends 'finished'. A
+    collection existing is no proof either: the service creates it, or swaps a
+    __tmp_<name> into place, with zero rows. So the signal is a document in the
+    dataset, and the MDH operation log explains a dataset that has none.
+
+    `started` is when this deploy began (timezone-aware UTC); operations older
+    than that are an earlier deploy's. Warns loudly; does not abort (imports
+    are async and a large one outlives this check).
     """
     invoked = {h["hook_name"] for h in csv_to_dict(assets.hooks_csv) if h.get("invoke") == "true"}
     datasets = {}
@@ -1332,35 +1381,53 @@ def verify_imports(rossum, client, assets, wait_s=180, poll_s=20):
     if not datasets:
         return
 
-    list_url = base_url(rossum["api_base_url"]) + "/svc/data-storage/api/v1/collections/list"
-    headers = {"Authorization": f"Bearer {rossum['target_org_token']}"}
-    print(f"\nVerifying {len(datasets)} Coupa import dataset(s) landed (up to {wait_s}s)...")
-
-    def landed(existing, name):
-        # collection present, or still importing (svc writes a __tmp_<name> first)
-        return name in existing or any(c.startswith(f"__tmp_{name}") for c in existing)
-
-    pending = set(datasets)
+    print(f"\nVerifying {len(datasets)} Coupa import dataset(s) received data (up to {wait_s}s)...")
+    states = {}
     waited = 0
     while True:
-        try:
-            resp = requests.post(list_url, headers=headers, json={}, timeout=30)
-            existing = set(resp.json().get("result", [])) if resp.ok else set()
-        except requests.RequestException:
-            existing = set()
-        pending = {d for d in pending if not landed(existing, d)}
-        if not pending or waited >= wait_s:
+        for name in datasets:
+            if states.get(name, (None,))[0] in (None, "not started", "processing"):
+                states[name] = _import_state(rossum, name, started)
+        # Wait only while something can still change: a finished or failed
+        # import without rows will not get any by waiting.
+        if waited >= wait_s or not any(s in ("not started", "processing") for s, _ in states.values()):
             break
         time.sleep(poll_s)
         waited += poll_s
 
-    if pending:
-        print("\n  WARNING: no data found for these Coupa import dataset(s):")
-        for name in sorted(pending):
-            print(f"    - {name}  (hook: {datasets[name]})")
+    groups = {}
+    for name, (state, op) in states.items():
+        groups.setdefault(state, []).append((name, op))
+
+    def show(state):
+        for name, op in sorted(groups.get(state, []), key=lambda x: x[0]):
+            error = f": {op.get('error')}" if op and op.get("error") else ""
+            print(f"    - {name}  (hook: {datasets[name]}){error}")
+
+    ok = len(groups.get("data", []))
+    if groups.get("finished"):
+        print("\n  WARNING: these imports finished but wrote NO rows:")
+        show("finished")
+        print("  Either Coupa has no matching records, the Coupa credential lacks that endpoint's")
+        print("  scope, or the import resumed from an earlier deploy's ${last_modified_date}")
+        print("  watermark: the MDH operation log outlives a cleaned organisation, so a redeploy")
+        print("  only asks Coupa for records changed since the last import of that dataset name.")
+    if groups.get("failed"):
+        print("\n  WARNING: these imports FAILED:")
+        show("failed")
+    if groups.get("not started"):
+        print("\n  WARNING: no import operation was recorded for these dataset(s):")
+        show("not started")
         print("  The import returns HTTP 202 even when the scheduled-imports service")
         print("  cannot write back (commonly a target_rossum_instance that does not")
         print("  match the org's region). Check target_rossum_instance and the hook")
-        print("  logs, then re-run. (Imports are async — re-check if still in progress.)")
+        print("  logs, then re-run.")
+    still = sorted(set(groups) - {"data", "finished", "failed", "not started"})  # 'processing'
+    if still:
+        print("\n  NOTE: still importing (large datasets take up to an hour); re-check them later:")
+        for state in still:
+            show(state)
+    if ok == len(datasets):
+        print("  All Coupa import datasets contain data.")
     else:
-        print("  All Coupa import datasets present.")
+        print(f"\n  {ok} of {len(datasets)} Coupa import dataset(s) contain data.")
