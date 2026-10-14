@@ -746,6 +746,72 @@ def verify_deployment(client, prd_path):
     sys.exit(1)
 
 
+def _rehost(obj, src, dst):
+    """Copy of obj with every string that starts with src starting with dst instead."""
+    if isinstance(obj, dict):
+        return {k: _rehost(v, src, dst) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_rehost(v, src, dst) for v in obj]
+    return dst + obj[len(src):] if isinstance(obj, str) and obj.startswith(src) else obj
+
+
+def _source_api_bases(prd_path, target_base):
+    """API bases of the release's directories other than the target (the CIB source org)."""
+    with open(os.path.join(prd_path, "prd_config.yaml")) as f:
+        dirs = (yaml.safe_load(f) or {}).get("directories") or {}
+    bases = {str(d.get("api_base", "")).rstrip("/") for d in dirs.values() if isinstance(d, dict)}
+    return sorted(b for b in bases if b and b != target_base.rstrip("/"))
+
+
+def _list_all(client, path):
+    url, out = f"{path}?page_size=100", []
+    while url:
+        page = client.request_json("GET", url)
+        out += page["results"]
+        url = (page.get("pagination") or {}).get("next")
+    return out
+
+
+def fix_rule_hosts(client, rossum, prd_path):
+    """Point rule actions at the target host instead of the CIB source org's.
+
+    prd2 (seen on v2.20.2) treats rule `actions` as unstructured data: it swaps
+    the object IDs in them but not the host. Only structured URL attributes get
+    the source-to-target base swap. CIB 2.0's four "Move to XX queue" rules
+    therefore deploy with change_queue payload.queue =
+    https://cib.rossum.app/api/v1/queues/<target queue id> -- the right id on
+    the wrong host, so the move never lands in the target org's queue.
+
+    Rewrites every action string that starts with a source API base. Anything
+    already on the target host, or not a URL, is left as it is.
+    """
+    try:
+        sources = _source_api_bases(prd_path, rossum["api_base_url"])
+    except (OSError, ValueError) as e:
+        print(f"  WARNING: could not read the release's prd_config.yaml ({e}); rule action hosts not checked.")
+        return
+    fixed = 0
+    for rule in _list_all(client, "rules"):
+        actions = rule.get("actions") or []
+        # The host the API itself answers with, which may differ from the configured URL's spelling.
+        target = rule["url"].split("/api/v1/")[0] + "/api/v1"
+        new = actions
+        for src in sources:
+            new = _rehost(new, src, target)
+        if new == actions:
+            continue
+        try:
+            client.request_json("PATCH", f"rules/{rule['id']}", json={"actions": new})
+        except APIClientError as e:
+            # Never abort here: hook configuration still has to run after this.
+            print(f"  WARNING: rule '{rule['name']}' still points at the source host; fix its actions "
+                  f"by hand ({e}).")
+            continue
+        fixed += 1
+        print(f"  Rule '{rule['name']}': action URLs moved to {target}")
+    print(f"  Rule action hosts OK ({fixed} rule(s) fixed).")
+
+
 def csv_to_dict(csv_file_path):
     with open(csv_file_path, mode='r', encoding='utf-8') as csv_file:
         # Read CSV data
