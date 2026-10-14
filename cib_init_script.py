@@ -17,6 +17,8 @@ from helpers import (check_hook_templates, check_org_features, check_prd2_availa
 # See its docstring in helpers.py before using it, and only in a test org:
 #     from helpers import clean_org
 
+from datetime import datetime, timezone
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 _config = json_to_dict('config.json')
@@ -30,6 +32,8 @@ check_rossum_api_version()
 
 
 def deploy_cib():
+    # Import operations older than this belong to an earlier deploy of the org.
+    started = datetime.now(timezone.utc)
     # The release is downloaded before anything is validated: from CIB 2.0 each
     # release carries its own deploy file, hooks.csv and Coupa scope map, and the
     # credential check needs that scope map. A wasted download on a bad
@@ -59,7 +63,7 @@ def deploy_cib():
     verify_deployment(client, prd_path)
     handle_hooks(ROSSUM, COUPA, client, assets)
     handle_memorisation_datasets(token=ROSSUM["target_org_token"], base_api_url=ROSSUM["api_base_url"])
-    verify_imports(ROSSUM, client, assets)
+    verify_imports(ROSSUM, client, assets, started)
 
 
 deploy_cib()

@@ -10,7 +10,7 @@ The script automatically:
 - Checks the target organisation before touching it: Coupa credential scopes, cluster region, that no CIB objects already exist, and that the organisation group allows the hook timeouts the release needs (see [Target organization prerequisites](#target-organization-prerequisites))
 - Deploys the queues, extraction engines, extensions, formula fields, rules and MDH matching configuration for that release (see [CIB versions](#cib-versions))
 - Configures the connection to your Coupa environment
-- Initiates data replication for the standard master data sets (suppliers, purchase orders, tax codes, payment terms, etc.)
+- Initiates data replication for the standard master data sets (suppliers, purchase orders, tax codes, payment terms, etc.) and checks that each import actually wrote rows — an import that cannot write back, or whose Coupa filter matched nothing, still reports success
 - Verifies afterwards that every object in the deploy file really exists in the target — prd2 reports per-object failures inline but still exits 0, so a partial deploy would otherwise look like a successful one
 
 > **Fresh installs only.** Every run creates a new set of objects. The script
