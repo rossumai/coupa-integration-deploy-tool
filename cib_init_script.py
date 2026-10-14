@@ -7,6 +7,7 @@ from rossum_api import SyncRossumAPIClient
 from rossum_api.dtos import Token
 
 from cib_assets import AssetResolutionError, resolve_assets
+from import_watermark import seed_imports
 from helpers import (check_hook_templates, check_org_features, check_prd2_available, check_region, check_script_version,
                      check_rossum_api_version, check_target_org_empty,
                      download_cib_release, handle_hooks, handle_memorisation_datasets,
@@ -16,6 +17,8 @@ from helpers import (check_hook_templates, check_org_features, check_prd2_availa
 # clean_org wipes the whole target organisation and is never called automatically.
 # See its docstring in helpers.py before using it, and only in a test org:
 #     from helpers import clean_org
+
+from datetime import datetime, timezone
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -30,6 +33,8 @@ check_rossum_api_version()
 
 
 def deploy_cib():
+    # Import operations older than this belong to an earlier deploy of the org.
+    started = datetime.now(timezone.utc)
     # The release is downloaded before anything is validated: from CIB 2.0 each
     # release carries its own deploy file, hooks.csv and Coupa scope map, and the
     # credential check needs that scope map. A wasted download on a bad
@@ -58,6 +63,7 @@ def deploy_cib():
     init_prd_release(client, ROSSUM, COUPA, prd_path, assets)
     verify_deployment(client, prd_path)
     handle_hooks(ROSSUM, COUPA, client, assets)
+    seed_imports(client, ROSSUM, started)
     handle_memorisation_datasets(token=ROSSUM["target_org_token"], base_api_url=ROSSUM["api_base_url"])
     verify_imports(ROSSUM, client, assets)
 
