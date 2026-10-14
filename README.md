@@ -23,6 +23,13 @@ The script automatically:
 > queues in the Rossum UI does not delete their rules** — around 50 rules stay
 > behind, invisible from the workspace view. Delete them too; the script checks
 > for them and refuses to start while they are there.
+>
+> Cleaning an organisation does **not** reset its master-data import history.
+> Coupa imports fetch only records changed since the last finished import of the
+> same dataset name, and that history outlives the deleted hooks and dropped
+> datasets. When the script finds such history it runs one full import per
+> affected dataset and then restores the incremental filter, so a redeploy is
+> not left with near-empty master data.
 
 ## CIB versions
 
