@@ -67,6 +67,83 @@ def _decode_token_scopes(access_token):
     return set(claim.split())
 
 
+# Valid-looking but unregistered: lets us ask how the endpoint treats a client it
+# does not know, which separates "this client is broken" from "Coupa is down".
+UNKNOWN_COUPA_CLIENT_ID = "0" * 32
+
+
+def _token_request(token_url, client_id, client_secret, scope=None):
+    """POST a client_credentials token request; return (status, OAuth error code or None).
+
+    Raises requests.RequestException on a network failure. Coupa's 500 is an HTML
+    page, so a non-JSON body simply yields no error code.
+    """
+    data = {"grant_type": "client_credentials", "client_id": client_id, "client_secret": client_secret}
+    if scope:
+        data["scope"] = scope
+    resp = requests.post(token_url, data=data, timeout=30)
+    try:
+        error = resp.json().get("error")
+    except ValueError:
+        error = None
+    return resp.status_code, error
+
+
+def _diagnose_token_failure(token_url, coupa, scope_unlocks, status, error):
+    """Explain why Coupa refused a token, as lines to print.
+
+    The bare request carries no scope, and Coupa answers it identically for very
+    different faults: a client missing most CIB scopes and a client of the wrong
+    type both came back as an HTML HTTP 500, which reads as "wrong client id or
+    secret" and is not. Asking again with one scope at a time and with an unknown
+    client id tells them apart:
+      - 401 / invalid_client           -> wrong client id or secret,
+      - invalid_scope for a scope      -> the client lacks that scope,
+      - every scope accepted, yet no token, while an unknown client gets 401
+                                       -> the client exists but is the wrong type
+                                          (Authorization code with redirect URLs,
+                                          or JWT authentication needing a JWKS URI).
+    """
+    if status == 401 or error == "invalid_client":
+        return [f"Coupa rejected the client id or secret (HTTP {status}{', ' + error if error else ''}).",
+                "Check coupa.client_id / coupa.client_secret in config.json: both must come",
+                "from the same Coupa OAuth client."]
+
+    try:
+        missing = sorted(s for s in scope_unlocks
+                         if _token_request(token_url, coupa["client_id"], coupa["client_secret"], s)[1]
+                         == "invalid_scope")
+        unknown_status = _token_request(token_url, UNKNOWN_COUPA_CLIENT_ID, "x")[0]
+    except requests.RequestException as e:
+        return [f"Coupa could not issue a token (HTTP {status}), and the follow-up diagnosis",
+                f"failed ({e}). Check the Coupa OAuth client and re-run."]
+
+    if missing:
+        lines = [f"Coupa could not issue a token (HTTP {status}): the OAuth client is missing "
+                 f"{len(missing)} of the {len(scope_unlocks)} scope(s) CIB requires:"]
+        lines += [f"    - {s}  -> {scope_unlocks[s]}" for s in missing]
+        lines += ["Grant them to the Coupa OAuth client and re-run. If it still fails afterwards,",
+                  "check the client type as described below."]
+        return lines + _client_type_hint()
+
+    if unknown_status in (400, 401):
+        return ([f"Coupa accepts this client and all its CIB scopes but still cannot issue a token",
+                 f"(HTTP {status}), while an unknown client id is rejected normally (HTTP {unknown_status}).",
+                 "The OAuth client itself is set up wrongly."] + _client_type_hint())
+
+    return [f"Coupa could not issue a token (HTTP {status}), and it fails the same way for an",
+            f"unknown client id (HTTP {unknown_status}): the Coupa instance itself seems to have a",
+            "problem. Retry later, or ask the Coupa administrator to check the instance."]
+
+
+def _client_type_hint():
+    return ["CIB needs a Coupa OAuth client of grant type 'Client credentials' that authenticates",
+            "with a client secret. A client with redirect URLs (Authorization code, e.g. one used",
+            "for user login) or one that asks for a JWKS URI (JWT authentication) will not work.",
+            "Create a separate client in Coupa (Setup > Oauth2/OpenID Connect Clients) and put its",
+            "client id and secret in config.json."]
+
+
 def verify_credentials(coupa, assets):
     """Fail fast if the Coupa OAuth credentials are invalid or under-scoped.
 
@@ -75,7 +152,8 @@ def verify_credentials(coupa, assets):
     dataset looks identical whether the tenant has no rows or the credential
     simply lacks that endpoint's scope. So verify here, before any resources are
     created:
-      - request a client_credentials token (catches wrong key/secret -> 401),
+      - request a client_credentials token; if refused, work out why
+        (see _diagnose_token_failure),
       - decode the granted scopes from the access_token JWT,
       - diff against REQUIRED_CIB_SCOPES.
     Missing scopes abort the deploy; extra scopes are an advisory (least
@@ -102,9 +180,12 @@ def verify_credentials(coupa, assets):
         return
 
     if not resp.ok:
-        print(f"\nERROR: Coupa rejected the OAuth credentials "
-              f"(HTTP {resp.status_code}): {resp.text.strip()[:300]}")
-        print("Check coupa.client_id / coupa.client_secret in config.json and re-run.")
+        try:
+            error = resp.json().get("error")
+        except ValueError:
+            error = None
+        print("\nERROR: " + "\n".join(
+            _diagnose_token_failure(token_url, coupa, scope_unlocks, resp.status_code, error)))
         sys.exit(1)
 
     try:
